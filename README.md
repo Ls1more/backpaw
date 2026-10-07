@@ -4,6 +4,8 @@
 
 **Get back what your AI coding agent deleted or moved.**
 
+[![test](https://github.com/Ls1more/backpaw/actions/workflows/test.yml/badge.svg)](https://github.com/Ls1more/backpaw/actions/workflows/test.yml)
+
 > **Use at your own risk.** Backpaw reduces the damage from accidental or prompt-injected deletes. It is
 > not a backup and cannot catch every way a program can delete files. Keep real backups (OneDrive, File
 > History, Time Machine). Provided as-is under the [MIT License](LICENSE), with no warranty.
