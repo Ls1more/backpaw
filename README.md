@@ -40,7 +40,8 @@ What it does:
 - **Session history**: lists deletes and moves from past Claude Code sessions (`~/.claude/projects`).
 - **Backup check**: warns at session start (Claude Code, Codex, Gemini CLI) and in the window when work
   isn't backed up. For **git projects**, pushing is the backup: Backpaw reminds you if the repo has no remote,
-  has commits not pushed for 3+ days, or has uncommitted changes on top of a 3+ day old commit. Other
+  has commits not pushed for 3+ days, or has uncommitted changes on top of a 3+ day old commit
+  (the number of days is adjustable under **Settings**). Other
   folders are checked for OneDrive (Windows) or iCloud / Time Machine (macOS). OneDrive isn't suggested for
   git repos, since syncing a `.git` folder can corrupt it. Includes a shortcut to Windows System Protection.
 

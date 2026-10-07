@@ -201,6 +201,13 @@ assert len(w) == 1 and "no remote" in w[0], w
 git(repo, "remote", "add", "origin", str(remote))
 w = backpaw.backup_warnings(repo)
 assert len(w) == 1 and "1 commit(s) not pushed" in w[0], w  # old commit, never pushed
+# the reminder threshold is a user setting; bad values in settings.json fall back to 3 days
+backpaw._save_prefs(stale_days=365)
+assert backpaw.stale_days() == 365 and backpaw.backup_warnings(repo) == []  # commit is ~9 months old
+for bad in ("abc", 0, -5, 9999, 2.5, None):
+    backpaw._save_prefs(stale_days=bad)
+    assert backpaw.stale_days() == 3, bad
+backpaw._save_prefs(stale_days=3)
 git(repo, "push", "-q", "origin", "HEAD")
 assert backpaw.backup_warnings(repo) == [], backpaw.backup_warnings(repo)  # pushed: fine, no OneDrive warning
 (repo / "a.py").write_text("2")

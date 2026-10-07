@@ -27,7 +27,7 @@ import time
 import uuid
 from pathlib import Path
 
-__version__ = "0.6.0"
+__version__ = "0.6.1"
 REPO_URL = "https://github.com/Ls1more/backpaw"
 ICON = Path(__file__).resolve().parent / "assets" / "logo.png"
 
@@ -368,7 +368,13 @@ def restore(entry):
 
 # ---------- backup check ----------
 
-STALE_DAYS = 3  # local-only git work older than this gets a reminder
+STALE_CHOICES = (1, 2, 3, 5, 7, 14, 30)  # days before local-only git work gets a reminder
+
+
+def stale_days():
+    """User setting (Settings dialog), validated since settings.json is a plain editable file."""
+    d = _load_prefs().get("stale_days", 3)
+    return d if isinstance(d, int) and 1 <= d <= 365 else 3
 
 
 def _git(folder, *args):
@@ -387,20 +393,20 @@ def git_warnings(folder):
     if not _git(folder, "remote"):
         return [f"{name} is a git repo with no remote, so every commit exists only on this PC. "
                 "Push it to GitHub (or similar) to back it up."]
-    warnings, now = [], time.time()
+    warnings, now, limit = [], time.time(), stale_days()
     # commits not on any remote (works with or without an upstream branch set)
     unpushed = _git(folder, "log", "HEAD", "--not", "--remotes", "--format=%ct")
     if unpushed:
         times = [int(t) for t in unpushed.split()]
         days = int((now - min(times)) / 86400)
-        if days >= STALE_DAYS:
+        if days >= limit:
             warnings.append(f"{name}: {len(times)} commit(s) not pushed; the oldest is {days} days old.")
     if _git(folder, "status", "--porcelain"):
         last = _git(folder, "log", "-1", "--format=%ct")
         days = int((now - int(last)) / 86400) if last else None
         if days is None:
             warnings.append(f"{name}: uncommitted changes and no commits yet.")
-        elif days >= STALE_DAYS:
+        elif days >= limit:
             warnings.append(f"{name}: uncommitted changes, and the last commit was {days} days ago. "
                             "Commit and push to back them up.")
     return warnings
@@ -728,18 +734,18 @@ def _dark_mode():
     return False
 
 
-def _load_ui():
-    """Window preferences (e.g. collapsed banner). Cosmetic only: any problem means defaults."""
+def _load_prefs():
+    """User settings and window state. Any problem reading them means defaults."""
     try:
-        return json.loads((DATA / "ui.json").read_text(encoding="utf-8"))
+        return json.loads((DATA / "settings.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
 
 
-def _save_ui(**prefs):
+def _save_prefs(**prefs):
     try:
         DATA.mkdir(exist_ok=True)
-        (DATA / "ui.json").write_text(json.dumps({**_load_ui(), **prefs}), encoding="utf-8")
+        (DATA / "settings.json").write_text(json.dumps({**_load_prefs(), **prefs}), encoding="utf-8")
     except OSError:
         pass
 
@@ -842,6 +848,8 @@ def gui():
         ttk.Button(win, text="Close", command=win.destroy).pack(anchor="e")
 
     ttk.Button(header, text="About", command=about).pack(side="right")
+    settings_btn = ttk.Button(header, text="Settings")  # command set once the banner exists
+    settings_btn.pack(side="right", padx=(0, 8))
     guard_btn = ttk.Button(header)
     guard_btn.pack(side="right", padx=8)
     guard_lbl = tk.Label(header, font=bold, bg=C["bg"], padx=10, pady=4)
@@ -889,9 +897,16 @@ def gui():
     # --- warnings ---
     folders = {os.path.abspath(r["cwd"]) for r in scan() if r["cwd"]} | {os.getcwd()}
     folders = [f for f in folders if not any(f != g and f.startswith(g + os.sep) for g in folders)]
-    warnings = sorted({w for f in folders for w in backup_warnings(f)})
-    if warnings:
-        bar = tk.Frame(root, bg=C["warn_bg"], padx=14, pady=10)
+    banner_slot = tk.Frame(root, bg=C["bg"])  # rebuilt in place when settings change
+    banner_slot.pack(fill="x")
+
+    def build_banner():
+        for child in banner_slot.winfo_children():
+            child.destroy()
+        warnings = sorted({w for f in folders for w in backup_warnings(f)})
+        if not warnings:
+            return
+        bar = tk.Frame(banner_slot, bg=C["warn_bg"], padx=14, pady=10)
         bar.pack(fill="x", padx=20, pady=(4, 8))
         top = tk.Frame(bar, bg=C["warn_bg"])
         top.pack(fill="x")
@@ -911,10 +926,10 @@ def gui():
                 body.pack_forget()
             toggle.configure(text="Hide ▴" if expanded else "Show details ▾")
             if save:
-                _save_ui(banner_collapsed=not expanded)
+                _save_prefs(banner_collapsed=not expanded)
 
         toggle.bind("<Button-1>", lambda _: show_banner(not banner["open"]))
-        show_banner(not _load_ui().get("banner_collapsed"), save=False)
+        show_banner(not _load_prefs().get("banner_collapsed"), save=False)
         if IS_WIN:
             act = tk.Frame(body, bg=C["warn_bg"])
             act.pack(anchor="w", pady=(6, 0))
@@ -923,6 +938,35 @@ def gui():
                        command=lambda: open_path("SystemPropertiesProtection.exe")).pack(side="left")
             ttk.Button(act, text="OneDrive backup settings…",
                        command=lambda: open_path("ms-settings:backup")).pack(side="left", padx=6)
+
+    build_banner()
+
+    def settings_dialog():
+        win = tk.Toplevel(root, bg=C["bg"], padx=24, pady=20)
+        win.title("Backpaw - settings")
+        win.transient(root)
+        win.resizable(False, False)
+        ttk.Label(win, text="Settings", font=bold).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 12))
+        ttk.Label(win, text="Remind me about unpushed or uncommitted git work after").grid(row=1, column=0, sticky="w")
+        labels = [f"{d} day" + ("s" if d > 1 else "") for d in STALE_CHOICES]
+        days = ttk.Combobox(win, values=labels, state="readonly", width=9)
+        current = stale_days() if stale_days() in STALE_CHOICES else 3
+        days.current(STALE_CHOICES.index(current))
+        days.grid(row=1, column=1, sticky="w", padx=(10, 0))
+        ttk.Label(win, text="Used in this window and in the reminder at the start of each agent session.",
+                  style="Muted.TLabel").grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 14))
+
+        def save():
+            _save_prefs(stale_days=STALE_CHOICES[days.current()])
+            build_banner()
+            win.destroy()
+
+        btns = ttk.Frame(win)
+        btns.grid(row=3, column=0, columnspan=2, sticky="e")
+        ttk.Button(btns, text="Cancel", command=win.destroy).pack(side="right")
+        ttk.Button(btns, text="Save", style="Accent.TButton", command=save).pack(side="right", padx=6)
+
+    settings_btn.configure(command=settings_dialog)
 
     # --- tabs ---
     tabs = ttk.Notebook(root)
