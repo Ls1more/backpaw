@@ -687,6 +687,22 @@ def _dark_mode():
     return False
 
 
+def _load_ui():
+    """Window preferences (e.g. collapsed banner). Cosmetic only: any problem means defaults."""
+    try:
+        return json.loads((DATA / "ui.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_ui(**prefs):
+    try:
+        DATA.mkdir(exist_ok=True)
+        (DATA / "ui.json").write_text(json.dumps({**_load_ui(), **prefs}), encoding="utf-8")
+    except OSError:
+        pass
+
+
 def open_path(target):
     try:
         if IS_WIN:
@@ -836,10 +852,30 @@ def gui():
     if warnings:
         bar = tk.Frame(root, bg=C["warn_bg"], padx=14, pady=10)
         bar.pack(fill="x", padx=20, pady=(4, 8))
-        tk.Label(bar, text="⚠  Not backed up", font=bold, bg=C["warn_bg"], fg=C["warn_fg"]).pack(anchor="w")
-        tk.Label(bar, text="\n".join(warnings), bg=C["warn_bg"], fg=C["warn_fg"], justify="left").pack(anchor="w")
+        top = tk.Frame(bar, bg=C["warn_bg"])
+        top.pack(fill="x")
+        tk.Label(top, text="⚠  Not backed up", font=bold, bg=C["warn_bg"], fg=C["warn_fg"]).pack(side="left")
+        body = tk.Frame(bar, bg=C["warn_bg"])
+        tk.Label(body, text="\n".join(warnings), bg=C["warn_bg"], fg=C["warn_fg"], justify="left").pack(anchor="w")
+        toggle = tk.Label(top, bg=C["warn_bg"], fg=C["warn_fg"], cursor="hand2")
+        toggle.pack(side="right")
+
+        banner = {"open": True}
+
+        def show_banner(expanded, save=True):
+            banner["open"] = expanded
+            if expanded:
+                body.pack(fill="x")
+            else:
+                body.pack_forget()
+            toggle.configure(text="Hide ▴" if expanded else "Show details ▾")
+            if save:
+                _save_ui(banner_collapsed=not expanded)
+
+        toggle.bind("<Button-1>", lambda _: show_banner(not banner["open"]))
+        show_banner(not _load_ui().get("banner_collapsed"), save=False)
         if IS_WIN:
-            act = tk.Frame(bar, bg=C["warn_bg"])
+            act = tk.Frame(body, bg=C["warn_bg"])
             act.pack(anchor="w", pady=(6, 0))
             ttk.Button(act, text="System Protection (shadow copies)…",
                        # needs admin: open via the shell so Windows shows its UAC prompt
