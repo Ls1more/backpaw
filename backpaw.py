@@ -27,7 +27,7 @@ import time
 import uuid
 from pathlib import Path
 
-__version__ = "0.5.1"
+__version__ = "0.6.0"
 REPO_URL = "https://github.com/Ls1more/backpaw"
 ICON = Path(__file__).resolve().parent / "assets" / "logo.png"
 
@@ -368,8 +368,49 @@ def restore(entry):
 
 # ---------- backup check ----------
 
+STALE_DAYS = 3  # local-only git work older than this gets a reminder
+
+
+def _git(folder, *args):
+    try:
+        r = subprocess.run(["git", "-C", folder, *args], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):  # git not installed, or hung
+        return None
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def git_warnings(folder):
+    """None if folder isn't in a git repo, else reminders about work that exists only on this machine."""
+    if _git(folder, "rev-parse", "--is-inside-work-tree") != "true":
+        return None
+    name = os.path.basename(_git(folder, "rev-parse", "--show-toplevel") or folder)
+    if not _git(folder, "remote"):
+        return [f"{name} is a git repo with no remote, so every commit exists only on this PC. "
+                "Push it to GitHub (or similar) to back it up."]
+    warnings, now = [], time.time()
+    # commits not on any remote (works with or without an upstream branch set)
+    unpushed = _git(folder, "log", "HEAD", "--not", "--remotes", "--format=%ct")
+    if unpushed:
+        times = [int(t) for t in unpushed.split()]
+        days = int((now - min(times)) / 86400)
+        if days >= STALE_DAYS:
+            warnings.append(f"{name}: {len(times)} commit(s) not pushed; the oldest is {days} days old.")
+    if _git(folder, "status", "--porcelain"):
+        last = _git(folder, "log", "-1", "--format=%ct")
+        days = int((now - int(last)) / 86400) if last else None
+        if days is None:
+            warnings.append(f"{name}: uncommitted changes and no commits yet.")
+        elif days >= STALE_DAYS:
+            warnings.append(f"{name}: uncommitted changes, and the last commit was {days} days ago. "
+                            "Commit and push to back them up.")
+    return warnings
+
+
 def backup_warnings(folder):
     folder = os.path.abspath(folder)
+    git = git_warnings(folder)
+    if git is not None:  # a git project is backed up by pushing, not by OneDrive (which can corrupt .git)
+        return git
     warnings = []
     if IS_WIN:
         roots = [os.environ.get(k) for k in ("OneDrive", "OneDriveConsumer", "OneDriveCommercial")]

@@ -38,8 +38,11 @@ What it does:
 - **Restore window**: select rows, click **Restore**. Turn the guard on or off per agent. Follows the
   system light/dark theme.
 - **Session history**: lists deletes and moves from past Claude Code sessions (`~/.claude/projects`).
-- **Backup check**: warns at session start (Claude Code, Codex, Gemini CLI) if the project folder isn't in
-  OneDrive (Windows) or in iCloud / Time Machine (macOS). Includes a shortcut to Windows System Protection.
+- **Backup check**: warns at session start (Claude Code, Codex, Gemini CLI) and in the window when work
+  isn't backed up. For **git projects**, pushing is the backup: Backpaw reminds you if the repo has no remote,
+  has commits not pushed for 3+ days, or has uncommitted changes on top of a 3+ day old commit. Other
+  folders are checked for OneDrive (Windows) or iCloud / Time Machine (macOS). OneDrive isn't suggested for
+  git repos, since syncing a `.git` folder can corrupt it. Includes a shortcut to Windows System Protection.
 
 Pure Python standard library. Windows and macOS.
 
