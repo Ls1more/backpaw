@@ -2,6 +2,7 @@
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import tomllib
@@ -30,7 +31,7 @@ def run_agent(agent, payload):
 
 
 # deletes are blocked outside temp...
-for cmd in ["rm -rf build", "ls && rm x", "Remove-Item foo -Recurse", "del a.txt", "cmd /c del x.txt",
+for cmd in ["rm -rf src", "ls && rm x", "Remove-Item foo -Recurse", "del a.txt", "cmd /c del x.txt",
             "find . -name '*.o' -delete", "python -c \"import shutil; shutil.rmtree('x')\"", "cd x; rmdir y",
             "[IO.File]::Delete('a')", "git clean -fdx", "git reset --hard HEAD", "rm $FILE"]:
     assert run_hook(cmd, home) == 2, cmd
@@ -99,6 +100,33 @@ assert run_hook("mv ghost.txt d.txt", work) == 0  # source doesn't exist: allowe
 moves = [(e["src"], e["dst"]) for e in backpaw.read_log() if e["op"] == "move"]
 assert moves == [(str(work / "a.txt"), str(work / "dir" / "a.txt")), (str(work / "b.txt"), str(work / "c.txt"))], moves
 
+# allowed folders: build output is deleted directly, everything else still goes through the guard
+(work / "node_modules").mkdir()
+(work / "src").mkdir()
+for cmd in ["rm -rf node_modules", "rm -rf dist build .next", "rm -rf node_modules/.cache",
+            "Remove-Item -Recurse __pycache__", "rm -rf src/__pycache__", "rm -rf dist/*"]:
+    assert run_hook(cmd, work) == 0, cmd
+for cmd in ["rm -rf src", "rm -rf node_modules/../src", "rm -rf node_modules src", f'rm -rf "{work.parent}"']:
+    assert run_hook(cmd, work) == 2, cmd
+(work / "build" / "proj").mkdir(parents=True)
+assert run_hook("rm -rf src", work / "build" / "proj") == 2  # a 'build' parent doesn't unlock what's below
+link = work / "dist"  # a 'dist' that is really a link to src is judged by where it points
+if backpaw.IS_WIN:
+    subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(work / "src")], check=True, capture_output=True)
+else:
+    os.symlink(work / "src", link)
+assert run_hook("rm -rf dist", work) == 2
+os.rmdir(link) if backpaw.IS_WIN else os.unlink(link)  # removes the link only
+backpaw._save_prefs(allowed_dirs=[])
+assert run_hook("rm -rf node_modules", work) == 2  # empty list: nothing is allowed
+backpaw._save_prefs(allowed_dirs=["out"])
+assert run_hook("rm -rf out", work) == 0 and run_hook("rm -rf node_modules", work) == 2
+backpaw._save_prefs(allowed_dirs=["../..", "C:/Users", "*", "$HOME", "ok"])
+assert backpaw.allowed_dirs() == ["ok"]  # only plain names survive a hand-edited settings file
+backpaw._save_prefs(allowed_dirs="node_modules")
+assert backpaw.allowed_dirs() == backpaw.DEFAULT_ALLOWED
+backpaw._save_prefs(allowed_dirs=backpaw.DEFAULT_ALLOWED)
+
 # move restore round trip (the move really happens, so the file identity matches)
 os.rename(work / "b.txt", work / "c.txt")
 entry = [e for e in backpaw.read_log() if e["op"] == "move"][1]
@@ -137,12 +165,16 @@ assert backpaw.risky_destination({"op": "trash", "path": home + "/.bashrc"})
 assert not backpaw.risky_destination({"op": "trash", "path": home + "/Desktop/report.docx"})
 
 # real trash + restore round trip
-victim = tmp / "victim.txt"
-victim.write_text("save me")
-t = backpaw.trash(victim)
-assert not victim.exists() and os.path.exists(t["trashed"]), t
-backpaw.restore(t)
-assert victim.read_text() == "save me"
+# (macOS needs Finder automation permission, which headless CI can't grant: opt in with BACKPAW_TEST_TRASH=1)
+if backpaw.IS_WIN or os.environ.get("BACKPAW_TEST_TRASH"):
+    victim = tmp / "victim.txt"
+    victim.write_text("save me")
+    t = backpaw.trash(victim)
+    assert not victim.exists() and os.path.exists(t["trashed"]), t
+    backpaw.restore(t)
+    assert victim.read_text() == "save me"
+else:
+    print("skipped real Trash round trip (set BACKPAW_TEST_TRASH=1 to run it)")
 
 # install / uninstall every agent into a fake home, keeping unrelated hooks intact
 fake = tmp / "home"

@@ -32,7 +32,8 @@ What it does:
 
 - **Guard**: blocks shell deletes and tells the agent to use `backpaw trash` instead, which sends files to
   the real **Recycle Bin** (Windows) or **Trash** (macOS). Also blocks `git clean` and `git reset --hard`.
-  Deletes inside the system temp folder (agent scratch space) and commands run over `ssh` are allowed.
+  Deletes inside the system temp folder (agent scratch space), build-output folders (`node_modules`, `dist`,
+  `build`, `.venv`, `__pycache__`, ... editable under **Settings**) and commands run over `ssh` are allowed.
 - **Move log**: every `mv` / `Move-Item` is recorded so it can be undone. A move that would overwrite an
   existing file is blocked until that file is trashed.
 - **Restore window**: select rows, click **Restore**. Turn the guard on or off per agent. Follows the

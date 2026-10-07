@@ -27,7 +27,7 @@ import time
 import uuid
 from pathlib import Path
 
-__version__ = "0.6.1"
+__version__ = "0.7.0"
 REPO_URL = "https://github.com/Ls1more/backpaw"
 ICON = Path(__file__).resolve().parent / "assets" / "logo.png"
 
@@ -369,6 +369,37 @@ def restore(entry):
 # ---------- backup check ----------
 
 STALE_CHOICES = (1, 2, 3, 5, 7, 14, 30)  # days before local-only git work gets a reminder
+# Build output and caches: deleted directly instead of filling the Recycle Bin (editable in Settings).
+DEFAULT_ALLOWED = ["node_modules", "dist", "build", ".venv", "venv", "__pycache__", ".next", "target",
+                   ".pytest_cache", ".cache"]
+
+
+def valid_dir_name(name):
+    return (isinstance(name, str) and name.strip() == name and name not in ("", ".", "..", "~")
+            and not re.search(r'[\\/:*?"<>|$]', name))
+
+
+def allowed_dirs():
+    names = _load_prefs().get("allowed_dirs", DEFAULT_ALLOWED)
+    return [n for n in names if valid_dir_name(n)] if isinstance(names, list) else DEFAULT_ALLOWED
+
+
+def allowed_delete(target, cwd):
+    """True if target is (or is inside, below cwd) a folder named in allowed_dirs, judged on both the
+    path as written and where it really points, so a 'dist' link to Documents doesn't count."""
+    names = {n.lower() for n in allowed_dirs()}
+
+    def ok(p, base):
+        if os.path.basename(p).lower() in names:
+            return True
+        try:
+            rel = os.path.relpath(p, base)
+        except ValueError:  # different drive
+            return False
+        return not rel.startswith("..") and any(part.lower() in names for part in Path(rel).parts)
+
+    return bool(names) and ok(os.path.abspath(target), os.path.abspath(cwd)) and \
+        ok(os.path.realpath(target), os.path.realpath(cwd))
 
 
 def stale_days():
@@ -447,7 +478,7 @@ def guard(command, cwd):
     if SELF_DISABLE.search(command):
         return BLOCK_SELF
     targets = delete_targets(command, cwd)
-    if targets is None or (targets and not all(map(in_temp, targets))):
+    if targets is None or (targets and not all(in_temp(t) or allowed_delete(t, cwd) for t in targets)):
         return BLOCK_DELETE.format(trash=trash_cmd)
     try:
         moves = list(parse_moves(command, cwd))
@@ -956,13 +987,32 @@ def gui():
         ttk.Label(win, text="Used in this window and in the reminder at the start of each agent session.",
                   style="Muted.TLabel").grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 14))
 
+        ttk.Label(win, text="Folders deleted directly instead of going to the Recycle Bin:").grid(
+            row=3, column=0, columnspan=2, sticky="w")
+        dirs = tk.StringVar(value=", ".join(allowed_dirs()))
+        tk.Entry(win, textvariable=dirs, bg=C["card"], fg=C["fg"], insertbackground=C["fg"], relief="solid",
+                 bd=1, highlightthickness=0).grid(row=4, column=0, columnspan=2, sticky="we", pady=(4, 4), ipady=4)
+        hint = ttk.Frame(win)
+        hint.grid(row=5, column=0, columnspan=2, sticky="we", pady=(0, 14))
+        ttk.Label(hint, text="Folder names, comma-separated. For build output and caches only: deletes here "
+                  "can't be restored.", style="Muted.TLabel").pack(side="left")
+        reset = ttk.Label(hint, text="Reset to defaults", foreground=C["accent"], cursor="hand2")
+        reset.pack(side="right")
+        reset.bind("<Button-1>", lambda _: dirs.set(", ".join(DEFAULT_ALLOWED)))
+
         def save():
-            _save_prefs(stale_days=STALE_CHOICES[days.current()])
+            names = [n.strip() for n in dirs.get().split(",") if n.strip()]
+            bad = [n for n in names if not valid_dir_name(n)]
+            if bad:
+                messagebox.showerror("Backpaw", "Use plain folder names (no slashes, drive letters, wildcards "
+                                     "or '..'):\n\n" + ", ".join(bad), parent=win)
+                return
+            _save_prefs(stale_days=STALE_CHOICES[days.current()], allowed_dirs=names)
             build_banner()
             win.destroy()
 
         btns = ttk.Frame(win)
-        btns.grid(row=3, column=0, columnspan=2, sticky="e")
+        btns.grid(row=6, column=0, columnspan=2, sticky="e")
         ttk.Button(btns, text="Cancel", command=win.destroy).pack(side="right")
         ttk.Button(btns, text="Save", style="Accent.TButton", command=save).pack(side="right", padx=6)
 
