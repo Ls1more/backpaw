@@ -4,6 +4,10 @@
 
 **Get back what your AI coding agent deleted or moved.**
 
+> **Use at your own risk.** Backpaw reduces the damage from accidental or prompt-injected deletes. It is
+> not a backup and cannot catch every way a program can delete files. Keep real backups (OneDrive, File
+> History, Time Machine). Provided as-is under the [MIT License](LICENSE), with no warranty.
+
 AI agents run shell commands. When one runs `rm -rf`, `Remove-Item` or `mv` on the wrong thing, the agent's
 own undo (like Claude Code's `/rewind`) can't help: shell side effects are outside checkpoint tracking.
 Backpaw covers that gap for every major agent:
@@ -110,3 +114,22 @@ Known gaps (by design or not yet covered):
 - Not yet supported: Cline and Kilo Code (no shell-command hooks), Aider (no hook system), Crush and Goose
   (hook support not confirmed in upstream docs).
 - macOS: the first `trash` asks for permission to control Finder (System Settings → Privacy → Automation).
+
+## Privacy
+
+Backpaw makes **no network connections** and collects nothing. Everything stays on your machine: the log
+(`~/.backpaw/log.jsonl`, file paths only) and the hook entries it adds to your agents' config files.
+The only link it opens is this repository, when you click it in the About box.
+
+## Reporting security issues
+
+See [SECURITY.md](SECURITY.md). Please report privately rather than in a public issue.
+
+## License and trademarks
+
+[MIT](LICENSE) © 2026 Ls1more.
+
+Backpaw is an independent project and is **not affiliated with, endorsed by, or sponsored by** Anthropic,
+OpenAI, Google, Anysphere (Cursor), GitHub/Microsoft, Windsurf/Cognition, Alibaba (Qwen), Moonshot AI
+(Kimi), or the OpenCode project. Product names are used only to describe compatibility and belong to
+their owners.
