@@ -35,7 +35,9 @@ including Claude Code pointed at an Anthropic-compatible endpoint.
 What it does:
 
 - **Guard**: blocks shell deletes and tells the agent to use `backpaw trash` instead, which sends files to
-  the real **Recycle Bin** (Windows) or **Trash** (macOS). Also blocks `git clean` and `git reset --hard`.
+  the real **Recycle Bin** (Windows) or **Trash** (macOS). Also blocks other ways to lose work: emptying the
+  Recycle Bin, `git clean`, `git reset --hard`, `git checkout --` / `git restore` / `git stash drop`,
+  `rsync --delete`, `robocopy /MIR`, and moves or copies that would overwrite an existing file.
   Deletes inside the system temp folder (agent scratch space), build-output folders (`node_modules`, `dist`,
   `build`, `.venv`, `__pycache__`, ... editable under **Settings**) and commands run over `ssh` are allowed.
 - **Move log**: every `mv` / `Move-Item` is recorded so it can be undone. A move that would overwrite an
@@ -50,23 +52,28 @@ What it does:
   folders are checked for OneDrive (Windows) or iCloud / Time Machine (macOS). OneDrive isn't suggested for
   git repos, since syncing a `.git` folder can corrupt it. Includes a shortcut to Windows System Protection.
 
-Pure Python standard library. Windows and macOS.
+Pure Python standard library, no dependencies. Tested on Windows and macOS with Python 3.11 and 3.13.
 
 ## Install
 
+Needs **Python 3.11+** ([python.org](https://www.python.org/downloads/), or on Windows
+`winget install Python.Python.3.13`) and git.
+
 ```bash
 git clone https://github.com/Ls1more/backpaw
-python backpaw/backpaw.py install            # guard every agent found on this machine (configs are backed up first)
-python backpaw/backpaw.py install cursor     # or pick agents
-python backpaw/backpaw.py uninstall          # remove it everywhere
+cd backpaw
+python backpaw.py install            # guard every agent found on this machine (configs are backed up first)
+python backpaw.py install cursor     # or pick agents
+python backpaw.py uninstall          # remove it everywhere
 ```
 
-Restart the agent after installing.
+Restart the agent after installing. You can also turn the guard on or off per agent from the window
+(**Agents…**).
 
 ## Use
 
 ```bash
-python backpaw.py              # restore window
+python backpaw.py              # restore window (on Windows, pythonw backpaw.py opens it without a console)
 python backpaw.py agents       # which agents are found / guarded
 python backpaw.py trash FILE   # recycle a file (what agents are told to run)
 python backpaw.py list         # log of trashed/moved items
@@ -78,6 +85,17 @@ python test_backpaw.py         # smoke test
 
 The log lives in `~/.backpaw/log.jsonl`. `install` copies Backpaw to `~/.backpaw/backpaw.py` and points
 the hooks there; after pulling a new version, run `install` again.
+
+## Settings
+
+Open **Settings** in the window. Saved in `~/.backpaw/settings.json` and used by both the window and the hooks.
+
+| Setting | Default | What it does |
+|---|---|---|
+| Git reminder after | 3 days | How old unpushed commits or uncommitted changes get before you're reminded (1–30 days). |
+| Folders deleted directly | `node_modules`, `dist`, `build`, `.venv`, `venv`, `__pycache__`, `.next`, `target`, `.pytest_cache`, `.cache` | Build output and caches that skip the Recycle Bin. Deletes here are **permanent**. Plain folder names only; matched on the folder being deleted or one inside the project on the way to it, never a parent above it, and links are judged by where they really point. |
+
+The "Not backed up" banner can be collapsed with **Hide**; that choice is remembered too.
 
 ## Security model
 
@@ -109,6 +127,9 @@ Known gaps (by design or not yet covered):
 - If Python is missing or the hook crashes, most agents let the command through (Copilot CLI blocks it).
 - An agent with unrestricted file access could edit its own hook config with its file-edit tool; only the
   shell route is blocked. Sandboxed agents can't reach those files.
+- False positives: a command whose *text* contains delete-like code (for example a heredoc with
+  `os.rmdir(...)` in it) is blocked too, since Backpaw can't tell data from code. The agent can write the
+  file with its file-edit tool instead.
 
 ## Limits
 
@@ -127,7 +148,8 @@ Known gaps (by design or not yet covered):
 ## Privacy
 
 Backpaw makes **no network connections** and collects nothing. Everything stays on your machine: the log
-(`~/.backpaw/log.jsonl`, file paths only) and the hook entries it adds to your agents' config files.
+(`~/.backpaw/log.jsonl`, file paths only), your settings (`~/.backpaw/settings.json`), and the hook entries
+it adds to your agents' config files.
 The only link it opens is this repository, when you click it in the About box.
 
 ## Reporting security issues
