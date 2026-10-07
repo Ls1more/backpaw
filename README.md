@@ -19,7 +19,7 @@ Pure Python standard library. Windows and macOS.
 ## Install
 
 ```bash
-git clone https://github.com/<you>/backpaw
+git clone https://github.com/Ls1more/backpaw
 python backpaw/backpaw.py install    # adds PreToolUse + SessionStart hooks to ~/.claude/settings.json (backs it up first)
 ```
 
