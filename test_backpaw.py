@@ -177,8 +177,9 @@ if backpaw.IS_WIN or os.environ.get("BACKPAW_TEST_TRASH"):
         import ctypes
         buf = ctypes.create_unicode_buffer(32768)
         ctypes.windll.kernel32.GetShortPathNameW(str(victim), buf, len(buf))
+        expected = backpaw._long_path(str(victim)).lower()  # while the file still exists
         t = backpaw.trash(buf.value or str(victim))
-        assert t["path"].lower() == backpaw._long_path(str(victim)).lower() and "~" not in t["path"], t
+        assert t["path"].lower() == expected and "~" not in t["path"], t
         backpaw.restore(t)
         assert victim.read_text() == "save me"
 else:
