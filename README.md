@@ -40,6 +40,11 @@ What it does:
   `rsync --delete`, `robocopy /MIR`, and moves or copies that would overwrite an existing file.
   Deletes inside the system temp folder (agent scratch space), build-output folders (`node_modules`, `dist`,
   `build`, `.venv`, `__pycache__`, ... editable under **Settings**) and commands run over `ssh` are allowed.
+- **Ask first for things a Recycle Bin can't catch**: destructive cloud, API and database commands
+  (`aws s3 rm`, `terraform destroy`, `kubectl delete`, `gh repo delete`, `git push --force`,
+  `curl -X DELETE`, `DROP TABLE`, `DELETE FROM` without `WHERE`, `FLUSHALL`, ...) and MCP tools whose names
+  say they delete data (`mcp__github__delete_repository`). Claude Code, Cursor and Copilot CLI show you a
+  confirmation prompt; agents without one are blocked and told to ask you. Can be turned off in **Settings**.
 - **Move log**: every `mv` / `Move-Item` is recorded so it can be undone. A move that would overwrite an
   existing file is blocked until that file is trashed.
 - **Restore window**: select rows, click **Restore**. Turn the guard on or off per agent. Follows the
@@ -94,6 +99,8 @@ Open **Settings** in the window. Saved in `~/.backpaw/settings.json` and used by
 |---|---|---|
 | Git reminder after | 3 days | How old unpushed commits or uncommitted changes get before you're reminded (1–30 days). |
 | Folders deleted directly | `node_modules`, `dist`, `build`, `.venv`, `venv`, `__pycache__`, `.next`, `target`, `.pytest_cache`, `.cache` | Build output and caches that skip the Recycle Bin. Deletes here are **permanent**. Plain folder names only; matched on the folder being deleted or one inside the project on the way to it, never a parent above it, and links are judged by where they really point. |
+
+| Ask before destructive cloud / API / database commands | On | Confirmation (or a block telling the agent to ask) for the commands and MCP tools listed above. |
 
 The "Not backed up" banner can be collapsed with **Hide**; that choice is remembered too.
 

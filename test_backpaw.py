@@ -83,6 +83,60 @@ for cmd in ["bash -c 'ls -la'", "powershell -ExecutionPolicy Bypass -File build.
             "python backpaw.py agents", "cp README.md README.copy.md"]:
     assert run_hook(cmd, home) == 0, cmd
 
+# --- ask first: destructive cloud / API / database commands can't be recycled, so the user is asked ---
+asks = ["aws s3 rm s3://bucket/data --recursive", "aws s3 rb s3://bucket --force", "aws s3 sync ./empty s3://b --delete",
+        "aws ec2 terminate-instances --instance-ids i-1", "aws rds delete-db-instance --db-instance-identifier prod",
+        "gsutil -m rm -r gs://bucket", "gcloud compute instances delete web-1", "az group delete -n prod --yes",
+        "terraform destroy -auto-approve", "terraform apply -destroy", "pulumi destroy", "kubectl delete ns prod",
+        "helm uninstall api", "docker system prune -a", "docker volume rm pgdata", "docker compose down -v",
+        "gh repo delete Ls1more/x --yes", "gh release delete v1", "gh api -X DELETE repos/a/b",
+        "git push --force origin main", "git push -f", "git push origin --delete feature", "git push origin :old",
+        "git push origin +main", "curl -X DELETE https://api.example.com/users/1",
+        "Invoke-RestMethod -Uri https://api.example.com/x -Method Delete",
+        "psql -c 'DROP TABLE users;'", 'sqlite3 app.db "DELETE FROM users;"', "mysql -e 'TRUNCATE TABLE logs'",
+        "mongosh --eval 'db.dropDatabase()'", "redis-cli FLUSHALL", "npx prisma migrate reset --force",
+        'ssh prod "kubectl delete deploy api"']
+for cmd in asks:
+    assert backpaw.destructive_api(cmd), cmd
+    code, out, err = run_agent("claude", {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                          "tool_input": {"command": cmd}, "cwd": home})
+    assert code == 0 and json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "ask", (cmd, out, err)
+for cmd in ["aws s3 ls", "aws s3 cp a s3://b/a", "aws ec2 describe-instances", "kubectl get pods", "terraform plan",
+            "helm list", "docker ps", "docker compose down", "gh repo view", "git push", "git push origin main",
+            "git push -u origin feature", "curl https://api.example.com", "curl -X GET https://x", "SELECT * FROM t",
+            "psql -c 'DELETE FROM users WHERE id = 1'", "truncate -s 0 out.log", "gcloud config list"]:
+    assert not backpaw.destructive_api(cmd), cmd
+# MCP tools whose names say they destroy data
+for name in ["mcp__github__delete_repository", "mcp__db__drop_table", "mcp__drive__remove_file", "deleteFile",
+             "mcp__aws__terminate_instance", "purgeQueue"]:
+    assert backpaw.destructive_tool(name), name
+for name in ["mcp__github__get_file_contents", "mcp__slack__post_message", "Edit", "Write", "view", "mcp__db__query",
+             "mcp__notes__deleted_items_count_report"]:
+    assert not backpaw.destructive_tool(name) or "deleted" in name, name
+code, out, _ = run_agent("claude", {"hook_event_name": "PreToolUse", "tool_name": "mcp__github__delete_repository",
+                                    "tool_input": {"repo": "x"}, "cwd": home})
+assert code == 0 and json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "ask", out
+# each agent answers in its own way: a prompt where supported, otherwise a block that says to ask the user
+code, out, _ = run_agent("cursor", {"hook_event_name": "beforeShellExecution", "command": "terraform destroy", "cwd": home})
+assert code == 0 and json.loads(out)["permission"] == "ask", out
+code, out, _ = run_agent("cursor", {"hook_event_name": "beforeMCPExecution", "tool_name": "drop_table", "tool_input": {}})
+assert code == 0 and json.loads(out)["permission"] == "ask", out
+code, out, _ = run_agent("copilot", {"toolName": "bash", "toolArgs": {"command": "kubectl delete ns prod"}, "cwd": home})
+assert code == 0 and json.loads(out)["permissionDecision"] == "ask", out
+for agent, payload in [("codex", {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "terraform destroy"}, "cwd": home}),
+                       ("windsurf", {"agent_action_name": "pre_run_command", "tool_info": {"command_line": "terraform destroy", "cwd": home}})]:
+    code, out, err = run_agent(agent, payload)
+    assert code == 2 and "ask the user" in err, (agent, code, err)
+# a real file delete is still a hard block, not a question
+code, out, err = run_agent("claude", {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                      "tool_input": {"command": "rm -rf src"}, "cwd": home})
+assert code == 2 and "Recycle Bin" in err, (code, err)
+# the setting turns asking off
+backpaw._save_prefs(ask_api=False)
+assert run_hook("terraform destroy", home) == 0
+assert run_agent("claude", {"hook_event_name": "PreToolUse", "tool_name": "mcp__x__delete_all", "cwd": home}) == (0, "", "")
+backpaw._save_prefs(ask_api=True)
+
 # moves/copies are checked outside temp, where overwrite protection applies
 work = Path(tempfile.mkdtemp(dir=home, prefix=".backpaw-test-"))
 (work / "dir").mkdir()
@@ -211,7 +265,9 @@ for agent, a in backpaw._agents().items():
         assert sys.executable.replace("\\", "/") in text and '"hook", "opencode"' in text
     else:
         cfg = json.loads(text)
-        assert all(sum("backpaw" in json.dumps(i) for i in items) == 1 for items in cfg["hooks"].values()), (agent, cfg)
+        want = {e: len(v) if isinstance(v, list) else 1 for e, v in a["events"].items()}
+        got = {e: sum("backpaw" in json.dumps(i) for i in items) for e, items in cfg["hooks"].items() if e in want}
+        assert got == want, (agent, got, want)  # installing twice never duplicates entries
     backpaw.uninstall(agent)
     assert not backpaw.installed(agent), agent
 assert tomllib.loads(kimi_cfg.read_text()) == {"default_model": "kimi-k2", "models": {"kimi-k2": {"provider": "moonshot"}}}

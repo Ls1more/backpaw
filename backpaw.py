@@ -27,7 +27,7 @@ import time
 import uuid
 from pathlib import Path
 
-__version__ = "0.7.1"
+__version__ = "0.8.0"
 REPO_URL = "https://github.com/Ls1more/backpaw"
 ICON = Path(__file__).resolve().parent / "assets" / "logo.png"
 
@@ -506,6 +506,49 @@ def guard(command, cwd):
     return None
 
 
+# ---------- ask first: destructive cloud / API calls ----------
+# These can't go to a Recycle Bin, so Backpaw asks the user instead of blocking (where the agent supports it).
+API_DESTRUCTIVE = [
+    ("delete cloud storage", r"\baws\s+s3\s+(?:rm|rb)\b|\baws\s+s3\s+sync\b.*\s--delete\b|\bgsutil\s+(?:-m\s+)?(?:rm|rb)\b"
+                             r"|\bgcloud\s+storage\s+rm\b|\bazcopy\s+(?:rm|remove)\b"),
+    ("delete cloud resources", r"\baws\s+\S+\s+(?:delete|terminate|deregister|remove)-\S+"
+                               r"|\bgcloud\b.*\s(?:delete|remove)\b|\baz\b.*\s(?:delete|purge)\b"
+                               r"|\bheroku\s+apps:destroy\b|\bvercel\s+(?:rm|remove)\b|\bfirebase\b.*\bdelete\b"),
+    ("destroy infrastructure", r"\b(?:terraform|tofu)\s+(?:destroy\b|apply\b.*\s-destroy\b)|\bpulumi\s+destroy\b"
+                               r"|\bkubectl\s+delete\b|\bhelm\s+(?:uninstall|delete)\b"
+                               r"|\bdocker\s+(?:system\s+prune|volume\s+(?:rm|prune)|compose\s+down\b.*\s-v\b)"),
+    ("delete on GitHub", r"\bgh\s+(?:repo|release|secret|variable|gist|run|cache)\s+delete\b"
+                         r"|\bgh\s+api\b.*(?:-X|--method)\s*['\"]?DELETE\b"),
+    ("rewrite or delete remote git history", r"\bgit\s+push\b.*(?:\s--force(?:-with-lease)?\b|\s-f\b|\s--delete\b"
+                                             r"|\s--mirror\b|\s\+\S|\s:\S)"),
+    ("send an HTTP DELETE", r"\bcurl\b.*(?:-X|--request)\s*['\"]?DELETE\b|\b(?:Invoke-RestMethod|Invoke-WebRequest|irm|iwr)\b.*-Method\s+['\"]?Delete\b"
+                            r"|\bhttp(?:ie)?\s+DELETE\b"),
+    ("drop or wipe database data", r"\bDROP\s+(?:TABLE|DATABASE|SCHEMA|COLLECTION|VIEW|INDEX)\b|\bTRUNCATE\s+(?:TABLE\s+)?\w"
+                                   r"|\bDELETE\s+FROM\s+[\w.\"`\[\]]+\s*(?:;|$|['\"])|\bdropDatabase\s*\(|\.drop\s*\(\s*\)"
+                                   r"|\bFLUSH(?:ALL|DB)\b|\bsupabase\s+db\s+reset\b|\bprisma\s+migrate\s+reset\b"),
+]
+API_DESTRUCTIVE = [(label, re.compile(rx, re.I | re.S)) for label, rx in API_DESTRUCTIVE]
+DESTRUCTIVE_WORDS = {"delete", "drop", "destroy", "purge", "remove", "truncate", "wipe", "erase", "terminate"}
+ASK_MSG = "Backpaw: this command will {what}, which can't be undone from the Recycle Bin. Approve only if you meant it."
+ASK_FALLBACK = ("Backpaw blocked a command that will {what}, which can't be undone. This agent can't show the user "
+                "a confirmation, so stop and ask the user to approve or run it themselves.")
+
+
+def ask_first_enabled():
+    return _load_prefs().get("ask_api", True) is not False
+
+
+def destructive_api(command):
+    """Label of the first destructive cloud/API/database pattern in command, or None."""
+    return next((label for label, rx in API_DESTRUCTIVE if rx.search(command)), None)
+
+
+def destructive_tool(name):
+    """True for MCP-style tool names like mcp__github__delete_repository or deleteFile."""
+    words = re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|\d+", name or "")
+    return bool(DESTRUCTIVE_WORDS & {w.lower() for w in words})
+
+
 # ---------- agents ----------
 # Each agent: how to read its hook payload, how to answer, and where its hook config lives.
 
@@ -526,6 +569,35 @@ def _extract(agent, data):
     return (data.get("tool_input") or {}).get("command"), data.get("cwd")
 
 
+def _tool_name(agent, data):
+    """Name of the non-shell tool being called (MCP tools etc.), or None."""
+    name = data.get("toolName") if agent == "copilot" else data.get("tool_name")
+    return None if not name or name.lower() in ("bash", "powershell", "shell", "run_shell_command") else name
+
+
+ASKS = {"claude", "cursor", "copilot"}  # agents whose hooks can show the user a confirmation
+
+
+def _answer(agent, kind, what_or_reason):
+    """Reply in the agent's own format. kind is 'block' (reason given) or 'ask' (what will happen)."""
+    if kind == "ask" and agent not in ASKS:
+        kind, what_or_reason = "block", ASK_FALLBACK.format(what=what_or_reason)
+    reason = ASK_MSG.format(what=what_or_reason) if kind == "ask" else what_or_reason
+    decision = "ask" if kind == "ask" else "deny"
+    if agent == "cursor":
+        print(json.dumps({"permission": decision, "user_message": reason, "agent_message": reason}))
+        return 0
+    if agent == "copilot":
+        print(json.dumps({"permissionDecision": decision, "permissionDecisionReason": reason}))
+        return 0
+    if kind == "ask":  # claude
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "ask",
+                                                 "permissionDecisionReason": reason}}))
+        return 0
+    print(reason, file=sys.stderr)  # exit 2 + stderr blocks in claude, codex, gemini, windsurf, qwen, kimi, opencode
+    return 2
+
+
 def hook(agent="claude"):
     data = json.load(sys.stdin)
     if data.get("hook_event_name") == "SessionStart":
@@ -533,23 +605,19 @@ def hook(agent="claude"):
         if w:
             print(json.dumps({"systemMessage": "Backpaw: " + " ".join(w)}))
         return 0
+    tool = _tool_name(agent, data)
+    if tool and destructive_tool(tool) and ask_first_enabled():
+        return _answer(agent, "ask", f"run {tool}, which looks like it deletes data")
     command, cwd = _extract(agent, data)
     if isinstance(command, list):
         command = " ".join(map(str, command))
     if not command:
         return 0
     reason = guard(command, cwd or os.getcwd())
-    if not reason:
-        return 0
-    if agent == "cursor":
-        print(json.dumps({"permission": "deny", "user_message": "Backpaw blocked a permanent delete.",
-                          "agent_message": reason}))
-        return 0
-    if agent == "copilot":
-        print(json.dumps({"permissionDecision": "deny", "permissionDecisionReason": reason}))
-        return 0
-    print(reason, file=sys.stderr)  # claude, codex, gemini, windsurf: exit 2 + stderr blocks
-    return 2
+    if reason:
+        return _answer(agent, "block", reason)
+    what = destructive_api(command) if ask_first_enabled() else None
+    return _answer(agent, "ask", what) if what else 0
 
 
 def _python():
@@ -589,14 +657,16 @@ def _agents():
 
     return {
         "claude": dict(name="Claude Code", home=CLAUDE, config=SETTINGS, base={},
-                       events={"PreToolUse": cc("claude", "Bash|PowerShell"), "SessionStart": cc("claude", "")}),
+                       events={"PreToolUse": [cc("claude", "Bash|PowerShell"), cc("claude", "mcp__.*")],
+                               "SessionStart": cc("claude", "")}),
         "codex": dict(name="Codex", home=HOME / ".codex", config=HOME / ".codex" / "hooks.json", base={},
                       events={"PreToolUse": cc("codex", "Bash"), "SessionStart": cc("codex", "")}),
         "gemini": dict(name="Gemini CLI", home=HOME / ".gemini", config=HOME / ".gemini" / "settings.json", base={},
                        events={"BeforeTool": cc("gemini", "run_shell_command"),
                                "SessionStart": cc("gemini", "startup")}),
         "cursor": dict(name="Cursor", home=HOME / ".cursor", config=HOME / ".cursor" / "hooks.json",
-                       base={"version": 1}, events={"beforeShellExecution": {"command": _hook_cmd("cursor")}}),
+                       base={"version": 1}, events={"beforeShellExecution": {"command": _hook_cmd("cursor")},
+                                                    "beforeMCPExecution": {"command": _hook_cmd("cursor")}}),
         "copilot": dict(name="GitHub Copilot CLI", home=HOME / ".copilot",
                         config=HOME / ".copilot" / "hooks" / "backpaw.json", base={"version": 1},
                         events={"preToolUse": {"type": "command", "bash": _hook_cmd("copilot"),
@@ -699,7 +769,7 @@ def install(agent):
         cfg.setdefault(k, v)
     hooks = cfg.setdefault("hooks", {})
     for event, item in a["events"].items():
-        hooks[event] = _without_backpaw(hooks.get(event, [])) + [item]
+        hooks[event] = _without_backpaw(hooks.get(event, [])) + (item if isinstance(item, list) else [item])
     _write_json(a["config"], cfg)
     return f"{a['name']}: guard installed in {a['config']}. Restart it to activate."
 
@@ -1010,6 +1080,15 @@ def gui():
         reset.pack(side="right")
         reset.bind("<Button-1>", lambda _: dirs.set(", ".join(DEFAULT_ALLOWED)))
 
+        ask = tk.BooleanVar(value=ask_first_enabled())
+        tk.Checkbutton(win, text="Ask before destructive cloud, API and database commands "
+                       "(aws s3 rm, terraform destroy, DROP TABLE, git push --force, MCP delete tools…)",
+                       variable=ask, bg=C["bg"], fg=C["fg"], selectcolor=C["card"], activebackground=C["bg"],
+                       activeforeground=C["fg"], anchor="w", justify="left", wraplength=int(620 * k)).grid(
+            row=6, column=0, columnspan=2, sticky="w", pady=(0, 4))
+        ttk.Label(win, text="Claude Code, Cursor and Copilot show you a prompt; other agents are told to ask you.",
+                  style="Muted.TLabel").grid(row=7, column=0, columnspan=2, sticky="w", pady=(0, 14))
+
         def save():
             names = [n.strip() for n in dirs.get().split(",") if n.strip()]
             bad = [n for n in names if not valid_dir_name(n)]
@@ -1017,12 +1096,12 @@ def gui():
                 messagebox.showerror("Backpaw", "Use plain folder names (no slashes, drive letters, wildcards "
                                      "or '..'):\n\n" + ", ".join(bad), parent=win)
                 return
-            _save_prefs(stale_days=STALE_CHOICES[days.current()], allowed_dirs=names)
+            _save_prefs(stale_days=STALE_CHOICES[days.current()], allowed_dirs=names, ask_api=ask.get())
             build_banner()
             win.destroy()
 
         btns = ttk.Frame(win)
-        btns.grid(row=6, column=0, columnspan=2, sticky="e")
+        btns.grid(row=8, column=0, columnspan=2, sticky="e")
         ttk.Button(btns, text="Cancel", command=win.destroy).pack(side="right")
         ttk.Button(btns, text="Save", style="Accent.TButton", command=save).pack(side="right", padx=6)
 
