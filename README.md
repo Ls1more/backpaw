@@ -8,6 +8,8 @@
 > not a backup and cannot catch every way a program can delete files. Keep real backups (OneDrive, File
 > History, Time Machine). Provided as-is under the [MIT License](LICENSE), with no warranty.
 
+<p align="center"><img src="assets/demo.gif" width="720" alt="Demo: an AI agent's rm -rf src is blocked by Backpaw, the folder goes to the Recycle Bin instead, and one click in the Backpaw window restores it"></p>
+
 AI agents run shell commands. When one runs `rm -rf`, `Remove-Item` or `mv` on the wrong thing, the agent's
 own undo (like Claude Code's `/rewind`) can't help: shell side effects are outside checkpoint tracking.
 Backpaw covers that gap for every major agent:
