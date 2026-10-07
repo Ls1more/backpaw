@@ -75,6 +75,19 @@ python backpaw.py uninstall          # remove it everywhere
 Restart the agent after installing. You can also turn the guard on or off per agent from the window
 (**Agents…**).
 
+> **"Python was not found; run without arguments to install from the Microsoft Store"?** Python is
+> installed, but the terminal (or the app it runs in) was opened before the install and still has the old
+> PATH. Open a new terminal, or restart the app hosting it. To fix the current PowerShell window without
+> restarting:
+>
+> ```powershell
+> $env:Path = [Environment]::GetEnvironmentVariable('Path','User') + ';' + [Environment]::GetEnvironmentVariable('Path','Machine')
+> ```
+>
+> To stop the Store prompt for good: **Settings → Apps → Advanced app settings → App execution aliases**,
+> turn off **python.exe** and **python3.exe**. The guard itself isn't affected: hooks call Python by its full
+> path.
+
 ## Use
 
 ```bash
