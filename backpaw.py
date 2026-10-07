@@ -27,7 +27,7 @@ import time
 import uuid
 from pathlib import Path
 
-__version__ = "0.8.0"
+__version__ = "0.8.1"
 REPO_URL = "https://github.com/Ls1more/backpaw"
 ICON = Path(__file__).resolve().parent / "assets" / "logo.png"
 
@@ -1140,6 +1140,7 @@ def gui():
     entries = {}
 
     def refresh():
+        selected, top = set(tv.selection()), tv.yview()[0]  # keep the user's place across refreshes
         tv.delete(*tv.get_children())
         entries.clear()
         for n, e in enumerate(reversed(read_log())):
@@ -1147,9 +1148,33 @@ def gui():
             path = e.get("path") or f'{e.get("src")}  →  {e.get("dst")}'
             tags = (e["status"], "stripe") if n % 2 else (e["status"],)
             tv.insert("", "end", iid=e["id"], values=(e["time"], e["op"], path, e["status"]), tags=tags)
+        tv.selection_set([i for i in selected if tv.exists(i)])
+        tv.yview_moveto(top)
         n = sum(e["status"] == "restorable" for e in entries.values())
         count_lbl.configure(text=f"{n} restorable · {len(entries)} logged" if entries else
                             "Nothing logged yet.")
+
+    def log_stamp():
+        try:
+            st = LOG.stat()
+            return st.st_mtime_ns, st.st_size
+        except OSError:
+            return None
+
+    # Auto-refresh: right away when the log changes (cheap stat every 2s), and fully every 30s or on
+    # focus, since statuses also change outside the log (Recycle Bin emptied, file moved again).
+    seen = {"stamp": log_stamp(), "full": time.time()}
+
+    def poll():
+        stamp = log_stamp()
+        if stamp != seen["stamp"] or time.time() - seen["full"] > 30:
+            seen.update(stamp=stamp, full=time.time())
+            refresh()
+            refresh_guard()
+        root.after(2000, poll)
+
+    root.bind("<FocusIn>", lambda e: seen.update(full=0) if e.widget is root else None)
+    root.after(2000, poll)
 
     def select_restorable():
         tv.selection_set([i for i, e in entries.items() if e["status"] == "restorable"])
