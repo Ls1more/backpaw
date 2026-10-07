@@ -1,14 +1,14 @@
 ﻿<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="1024" height="1024">
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#e8926f"/>
-      <stop offset="1" stop-color="#bf5a37"/>
+      <stop offset="0" stop-color="#2a2b30"/>
+      <stop offset="1" stop-color="#141518"/>
     </linearGradient>
   </defs>
   <rect width="512" height="512" fill="url(#bg)"/>
   <!-- "get it back" arc: counter-clockwise from upper right, around, to lower right -->
-  <path d="M390 122 A190 190 0 1 0 434.5 321" fill="none" stroke="#fff" stroke-width="26" stroke-linecap="round"/>
-  <polygon points="445.4,290.9 455.4,339.3 406.6,321.5" fill="#fff" stroke="#fff" stroke-width="10" stroke-linejoin="round"/>
+  <path d="M390 122 A190 190 0 1 0 434.5 321" fill="none" stroke="#d97757" stroke-width="26" stroke-linecap="round"/>
+  <polygon points="445.4,290.9 455.4,339.3 406.6,321.5" fill="#d97757" stroke="#d97757" stroke-width="10" stroke-linejoin="round"/>
   <!-- paw -->
   <g fill="#fff">
     <path d="M256 245 C300 245 335 300 335 325 C335 355 300 360 256 350 C212 360 177 355 177 325 C177 300 212 245 256 245 Z"/>

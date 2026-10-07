@@ -29,6 +29,7 @@ from pathlib import Path
 
 __version__ = "0.5.1"
 REPO_URL = "https://github.com/Ls1more/backpaw"
+ICON = Path(__file__).resolve().parent / "assets" / "logo.png"
 
 HOME = Path.home()
 DATA = HOME / ".backpaw"
@@ -482,6 +483,9 @@ def _copy_self():
     if Path(__file__).resolve() != target.resolve():
         DATA.mkdir(exist_ok=True)
         shutil.copy2(__file__, target)
+        if ICON.exists():
+            (DATA / "assets").mkdir(exist_ok=True)
+            shutil.copy2(ICON, DATA / "assets" / ICON.name)
 
 
 def _hook_cmd(agent, powershell=False):
@@ -684,10 +688,13 @@ def _dark_mode():
 
 
 def open_path(target):
-    if IS_WIN:
-        os.startfile(target)
-    else:
-        subprocess.Popen(["open", target])
+    try:
+        if IS_WIN:
+            os.startfile(target)  # ShellExecute: also raises the UAC prompt for admin-only tools
+        else:
+            subprocess.Popen(["open", target])
+    except OSError:  # e.g. the user said No to the admin prompt
+        pass
 
 
 def gui():
@@ -699,12 +706,24 @@ def gui():
         try:
             import ctypes
             ctypes.windll.shcore.SetProcessDpiAwareness(1)
+            # own taskbar identity, so Windows shows the Backpaw icon instead of Python's
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Backpaw")
         except (AttributeError, OSError):
             pass
     C = DARK if _dark_mode() else LIGHT
     root = tk.Tk()
     root.title("Backpaw")
     k = root.winfo_fpixels("1i") / 96
+    logo = tk.PhotoImage(file=str(ICON)) if ICON.exists() else None
+    if logo:
+        root.iconphoto(True, logo.subsample(16), logo.subsample(32))  # 64px + 32px, all windows
+        root._logos = [logo.subsample(max(1, int(1024 / (36 * k)))), logo.subsample(max(1, int(1024 / (64 * k))))]
+
+    def brand(parent, size):
+        """Logo + name; falls back to text if the logo file isn't next to the script."""
+        img = root._logos[size] if logo else ""
+        return ttk.Label(parent, text=" Backpaw" if logo else "Backpaw", image=img, compound="left",
+                         style="Title.TLabel")
     root.geometry(f"{int(1080 * k)}x{int(640 * k)}")
     root.minsize(int(760 * k), int(420 * k))
     root.configure(bg=C["bg"])
@@ -741,7 +760,7 @@ def gui():
     # --- header ---
     header = ttk.Frame(root, padding=(20, 16, 20, 8))
     header.pack(fill="x")
-    ttk.Label(header, text="🐾 Backpaw", style="Title.TLabel").pack(side="left")
+    brand(header, 0).pack(side="left")
     ttk.Label(header, text="  Get back what your AI agent deleted or moved", style="Muted.TLabel").pack(side="left", pady=(6, 0))
 
     def about():
@@ -749,7 +768,7 @@ def gui():
         win.title("About Backpaw")
         win.resizable(False, False)
         win.transient(root)
-        ttk.Label(win, text="🐾 Backpaw", style="Title.TLabel").pack(anchor="w")
+        brand(win, 1).pack(anchor="w")
         ttk.Label(win, text=f"Version {__version__}", style="Muted.TLabel").pack(anchor="w")
         ttk.Label(win, text="Get back what AI coding agents deleted or moved.\nRecycle Bin guard, move log, and restore.",
                   justify="left").pack(anchor="w", pady=(12, 12))
@@ -823,7 +842,8 @@ def gui():
             act = tk.Frame(bar, bg=C["warn_bg"])
             act.pack(anchor="w", pady=(6, 0))
             ttk.Button(act, text="System Protection (shadow copies)…",
-                       command=lambda: subprocess.Popen(["SystemPropertiesProtection.exe"])).pack(side="left")
+                       # needs admin: open via the shell so Windows shows its UAC prompt
+                       command=lambda: open_path("SystemPropertiesProtection.exe")).pack(side="left")
             ttk.Button(act, text="OneDrive backup settings…",
                        command=lambda: open_path("ms-settings:backup")).pack(side="left", padx=6)
 

@@ -1,6 +1,6 @@
-<p align="center"><img src="assets/logo-dark.png" width="160" alt="Backpaw logo: a paw print inside a circular undo arrow"></p>
+<p align="center"><img src="assets/logo.png" width="160" alt="Backpaw logo: a paw print inside a circular undo arrow"></p>
 
-# Backpaw 🐾
+# Backpaw
 
 **Get back what your AI coding agent deleted or moved.**
 
