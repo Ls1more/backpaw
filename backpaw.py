@@ -27,7 +27,7 @@ import time
 import uuid
 from pathlib import Path
 
-__version__ = "0.5.0"
+__version__ = "0.5.1"
 REPO_URL = "https://github.com/Ls1more/backpaw"
 
 HOME = Path.home()
@@ -395,7 +395,7 @@ BLOCK_SELF = "Backpaw can only be turned off by the user. Ask them to run the un
 
 def guard(command, cwd):
     """Agent-independent decision: None to allow, or the reason to block. Logs allowed moves."""
-    trash_cmd = f'python "{Path(__file__).resolve().as_posix()}" trash <path> [<path> ...]'
+    trash_cmd = f'"{_python()}" "{Path(__file__).resolve().as_posix()}" trash <path> [<path> ...]'
     if SELF_DISABLE.search(command):
         return BLOCK_SELF
     targets = delete_targets(command, cwd)
@@ -463,6 +463,14 @@ def hook(agent="claude"):
     return 2
 
 
+def _python():
+    """Console Python, even when running from the windowless pythonw.exe (GUI), so hooks keep their stdio."""
+    exe = Path(sys.executable)
+    if exe.name.lower() == "pythonw.exe" and (exe.parent / "python.exe").exists():
+        exe = exe.parent / "python.exe"
+    return exe.as_posix()
+
+
 def _installed_script():
     # Hooks run outside the agent's sandbox, so they must not run a file the agent can edit (like a
     # clone inside a project folder). install copies Backpaw here, next to its log.
@@ -478,7 +486,7 @@ def _copy_self():
 
 def _hook_cmd(agent, powershell=False):
     """Hook command line, quoted only where needed so one string works in bash and cmd."""
-    parts = [Path(sys.executable).as_posix(), _installed_script().as_posix(), "hook", agent]
+    parts = [_python(), _installed_script().as_posix(), "hook", agent]
     line = " ".join(f'"{p}"' if " " in p else p for p in parts)
     return "& " + line if powershell and " " in parts[0] else line
 
@@ -587,7 +595,7 @@ def install(agent):
     a = _agents()[agent]
     _copy_self()
     if a.get("kind") == "plugin":
-        js = OPENCODE_PLUGIN.replace("__PYTHON__", json.dumps(Path(sys.executable).as_posix()))
+        js = OPENCODE_PLUGIN.replace("__PYTHON__", json.dumps(_python()))
         _write_text(a["config"], js.replace("__SCRIPT__", json.dumps(_installed_script().as_posix())))
         return f"{a['name']}: guard plugin written to {a['config']}. Restart it to activate."
     if a.get("kind") == "toml":
