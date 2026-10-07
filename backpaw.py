@@ -265,6 +265,7 @@ def trash(path):
     if not os.path.lexists(p):
         raise FileNotFoundError(p)
     if IS_WIN:
+        p = _long_path(p)  # the Recycle Bin records full names, never 8.3 forms like RUNNER~1
         trashed = _trash_windows(p)
     elif IS_MAC:
         trashed = _trash_mac(p)
@@ -299,8 +300,17 @@ def _trash_windows(p):
         raise OSError(f"Recycle Bin move failed for {p} (code {rc})")
     found = _find_in_recycle_bin(p, since=started - 2)
     if not found:
-        raise OSError(f"{p} was removed but not found in the Recycle Bin")
+        raise OSError(f"{p} was sent to the Recycle Bin but Backpaw couldn't find its record there; "
+                      "restore it from the Recycle Bin directly")
     return found
+
+
+def _long_path(p):
+    """Expand 8.3 short names (C:\\Users\\RUNNER~1) without following links, unlike realpath."""
+    import ctypes
+    buf = ctypes.create_unicode_buffer(32768)
+    n = ctypes.windll.kernel32.GetLongPathNameW(p, buf, len(buf))
+    return buf.value if 0 < n < len(buf) else p
 
 
 def _read_info_file(ipath):

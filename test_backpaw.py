@@ -173,6 +173,14 @@ if backpaw.IS_WIN or os.environ.get("BACKPAW_TEST_TRASH"):
     assert not victim.exists() and os.path.exists(t["trashed"]), t
     backpaw.restore(t)
     assert victim.read_text() == "save me"
+    if backpaw.IS_WIN:  # trashing via an 8.3 short path (e.g. C:\Users\RUNNER~1) must still be recorded
+        import ctypes
+        buf = ctypes.create_unicode_buffer(32768)
+        ctypes.windll.kernel32.GetShortPathNameW(str(victim), buf, len(buf))
+        t = backpaw.trash(buf.value or str(victim))
+        assert t["path"].lower() == str(victim).lower(), t
+        backpaw.restore(t)
+        assert victim.read_text() == "save me"
 else:
     print("skipped real Trash round trip (set BACKPAW_TEST_TRASH=1 to run it)")
 
