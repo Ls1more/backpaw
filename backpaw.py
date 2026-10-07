@@ -1,14 +1,17 @@
-"""Backpaw: see what Claude Code deleted or moved, and put it back.
+"""Backpaw: see what your AI coding agent deleted or moved, and put it back.
 
   backpaw                 open the restore window
   backpaw trash PATH...   send paths to the Recycle Bin / Trash (logged)
   backpaw list            print the log
   backpaw scan            print deletes/moves found in past Claude sessions
   backpaw check [DIR]     warn if DIR (default: cwd) is not backed up
-  backpaw install         add the Backpaw hooks to ~/.claude/settings.json
-  backpaw uninstall       remove them again
+  backpaw agents          list supported AI agents and whether the guard is on
+  backpaw install [AGENT...]    turn the guard on (default: every agent found)
+  backpaw uninstall [AGENT...]  turn it off (default: everywhere it is on)
   backpaw --version
-  backpaw hook            (called by Claude Code) PreToolUse / SessionStart handler
+  backpaw hook AGENT      (called by the agent) pre-command / session-start handler
+
+Agents: claude, codex, gemini, cursor, copilot, windsurf
 """
 import glob
 import json
@@ -24,7 +27,7 @@ import time
 import uuid
 from pathlib import Path
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 REPO_URL = "https://github.com/Ls1more/backpaw"
 
 HOME = Path.home()
@@ -279,85 +282,161 @@ def backup_warnings(folder):
     return warnings
 
 
-# ---------- hook ----------
+# ---------- guard ----------
 
-def hook():
+BLOCK_DELETE = ("Backpaw blocked a command that permanently deletes files or discards uncommitted work.\n"
+                "To delete files, send them to the Recycle Bin/Trash so they can be restored:\n  {trash}\n"
+                "For git clean / reset --hard: commit or stash first, or ask the user.\n"
+                "Run any remaining (non-delete) parts of the command separately.")
+BLOCK_CLOBBER = "Backpaw blocked a move that would overwrite {files}.\nSend the existing file to the Recycle Bin first:\n  {trash}"
+
+
+def guard(command, cwd):
+    """Agent-independent decision: None to allow, or the reason to block. Logs allowed moves."""
+    trash_cmd = f'python "{Path(__file__).resolve().as_posix()}" trash <path> [<path> ...]'
+    targets = delete_targets(command, cwd)
+    if targets is None or (targets and not all(map(in_temp, targets))):
+        return BLOCK_DELETE.format(trash=trash_cmd)
+    try:
+        moves = list(parse_moves(command, cwd))
+    except Exception:  # never let a parse bug crash the hook; the delete check already ran
+        return None
+    clobbered = [d for _, d in moves if os.path.isfile(d)]
+    if clobbered:
+        return BLOCK_CLOBBER.format(files=", ".join(clobbered), trash=trash_cmd)
+    for src, dst in moves:
+        log({"op": "move", "src": src, "dst": dst, "command": command})
+    return None
+
+
+# ---------- agents ----------
+# Each agent: how to read its hook payload, how to answer, and where its hook config lives.
+
+def _extract(agent, data):
+    """-> (command, cwd) from an agent's hook payload; command is None if it isn't a shell call."""
+    if agent == "cursor":
+        return data.get("command"), data.get("cwd") or (data.get("workspace_roots") or [None])[0]
+    if agent == "windsurf":
+        info = data.get("tool_info") or {}
+        return info.get("command_line"), info.get("cwd")
+    if agent == "copilot":
+        if data.get("toolName") not in ("bash", "powershell", "shell"):
+            return None, None
+        args = data.get("toolArgs") or {}
+        args = json.loads(args) if isinstance(args, str) else args
+        return args.get("command"), data.get("cwd")
+    # claude, codex, gemini share the tool_name / tool_input shape
+    return (data.get("tool_input") or {}).get("command"), data.get("cwd")
+
+
+def hook(agent="claude"):
     data = json.load(sys.stdin)
     if data.get("hook_event_name") == "SessionStart":
         w = backup_warnings(data.get("cwd") or os.getcwd())
         if w:
             print(json.dumps({"systemMessage": "Backpaw: " + " ".join(w)}))
         return 0
-    if data.get("tool_name") not in SHELL_TOOLS:
+    command, cwd = _extract(agent, data)
+    if isinstance(command, list):
+        command = " ".join(map(str, command))
+    if not command:
         return 0
-    command = (data.get("tool_input") or {}).get("command", "")
-    cwd = data.get("cwd") or os.getcwd()
-    me = f'python "{Path(__file__).resolve().as_posix()}" trash <path> [<path> ...]'
+    reason = guard(command, cwd or os.getcwd())
+    if not reason:
+        return 0
+    if agent == "cursor":
+        print(json.dumps({"permission": "deny", "user_message": "Backpaw blocked a permanent delete.",
+                          "agent_message": reason}))
+        return 0
+    if agent == "copilot":
+        print(json.dumps({"permissionDecision": "deny", "permissionDecisionReason": reason}))
+        return 0
+    print(reason, file=sys.stderr)  # claude, codex, gemini, windsurf: exit 2 + stderr blocks
+    return 2
 
-    targets = delete_targets(command, cwd)
-    if targets is None or (targets and not all(map(in_temp, targets))):
-        print("Backpaw blocked a command that permanently deletes files or discards uncommitted work.\n"
-              f"To delete files, send them to the Recycle Bin/Trash so they can be restored:\n  {me}\n"
-              "For git clean / reset --hard: commit or stash first, or ask the user.\n"
-              "Run any remaining (non-delete) parts of the command separately.", file=sys.stderr)
-        return 2
 
+def _hook_cmd(agent, powershell=False):
+    """Hook command line, quoted only where needed so one string works in bash and cmd."""
+    parts = [Path(sys.executable).as_posix(), Path(__file__).resolve().as_posix(), "hook", agent]
+    line = " ".join(f'"{p}"' if " " in p else p for p in parts)
+    return "& " + line if powershell and " " in parts[0] else line
+
+
+def _agents():
+    def cc(agent, matcher):  # Claude-style matcher group
+        return {"matcher": matcher, "hooks": [{"type": "command", "command": _hook_cmd(agent)}]}
+
+    return {
+        "claude": dict(name="Claude Code", home=CLAUDE, config=SETTINGS, base={},
+                       events={"PreToolUse": cc("claude", "Bash|PowerShell"), "SessionStart": cc("claude", "")}),
+        "codex": dict(name="Codex", home=HOME / ".codex", config=HOME / ".codex" / "hooks.json", base={},
+                      events={"PreToolUse": cc("codex", "Bash"), "SessionStart": cc("codex", "")}),
+        "gemini": dict(name="Gemini CLI", home=HOME / ".gemini", config=HOME / ".gemini" / "settings.json", base={},
+                       events={"BeforeTool": cc("gemini", "run_shell_command"),
+                               "SessionStart": cc("gemini", "startup")}),
+        "cursor": dict(name="Cursor", home=HOME / ".cursor", config=HOME / ".cursor" / "hooks.json",
+                       base={"version": 1}, events={"beforeShellExecution": {"command": _hook_cmd("cursor")}}),
+        "copilot": dict(name="GitHub Copilot CLI", home=HOME / ".copilot",
+                        config=HOME / ".copilot" / "hooks" / "backpaw.json", base={"version": 1},
+                        events={"preToolUse": {"type": "command", "bash": _hook_cmd("copilot"),
+                                               "powershell": _hook_cmd("copilot", True), "timeoutSec": 30}}),
+        "windsurf": dict(name="Windsurf", home=HOME / ".codeium" / "windsurf",
+                         config=HOME / ".codeium" / "windsurf" / "hooks.json", base={},
+                         events={"pre_run_command": {"command": _hook_cmd("windsurf"),
+                                                     "powershell": _hook_cmd("windsurf", True), "show_output": True}}),
+    }
+
+
+def _read_json(path):
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+
+
+def _write_json(path, cfg):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        shutil.copy2(path, path.with_suffix(path.suffix + ".backpaw-bak"))
+    path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+
+
+def _without_backpaw(items):
+    return [i for i in items if "backpaw" not in json.dumps(i)]
+
+
+def detected_agents():
+    return [k for k, a in _agents().items() if a["home"].is_dir()]
+
+
+def installed(agent):
     try:
-        moves = list(parse_moves(command, cwd))
-    except Exception:  # never let a parse bug crash the hook; the delete check already ran
-        return 0
-    clobbered = [d for _, d in moves if os.path.isfile(d)]
-    if clobbered:
-        print(f"Backpaw blocked a move that would overwrite {', '.join(clobbered)}.\n"
-              f"Send the existing file to the Recycle Bin first:\n  {me}", file=sys.stderr)
-        return 2
-    for src, dst in moves:
-        log({"op": "move", "src": src, "dst": dst, "command": command})
-    return 0
+        return "backpaw" in json.dumps(_read_json(_agents()[agent]["config"]).get("hooks", {}))
+    except (OSError, ValueError):
+        return False
 
 
-def _without_backpaw(groups):
-    return [g for g in groups if not any("backpaw" in h.get("command", "") for h in g.get("hooks", []))]
-
-
-def _write_settings(cfg):
-    if SETTINGS.exists():
-        shutil.copy2(SETTINGS, SETTINGS.with_suffix(".json.backpaw-bak"))
-    SETTINGS.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
-
-
-def _read_settings():
-    return json.loads(SETTINGS.read_text(encoding="utf-8")) if SETTINGS.exists() else {}
-
-
-def install():
-    cfg = _read_settings()
-    cmd = f'"{Path(sys.executable).as_posix()}" "{Path(__file__).resolve().as_posix()}" hook'
+def install(agent):
+    a = _agents()[agent]
+    cfg = _read_json(a["config"])
+    for k, v in a["base"].items():
+        cfg.setdefault(k, v)
     hooks = cfg.setdefault("hooks", {})
-    for event, matcher in (("PreToolUse", "Bash|PowerShell"), ("SessionStart", "")):
-        hooks[event] = _without_backpaw(hooks.get(event, []))
-        hooks[event].append({"matcher": matcher, "hooks": [{"type": "command", "command": cmd}]})
-    _write_settings(cfg)
-    return f"Installed Backpaw hooks into {SETTINGS}. Restart Claude Code to activate."
+    for event, item in a["events"].items():
+        hooks[event] = _without_backpaw(hooks.get(event, [])) + [item]
+    _write_json(a["config"], cfg)
+    return f"{a['name']}: guard installed in {a['config']}. Restart it to activate."
 
 
-def uninstall():
-    cfg = _read_settings()
+def uninstall(agent):
+    a = _agents()[agent]
+    if not a["config"].exists():
+        return f"{a['name']}: not installed."
+    cfg = _read_json(a["config"])
     hooks = cfg.get("hooks", {})
     for event in list(hooks):
         hooks[event] = _without_backpaw(hooks[event])
         if not hooks[event]:
             del hooks[event]
-    _write_settings(cfg)
-    return f"Removed Backpaw hooks from {SETTINGS}. Restart Claude Code."
-
-
-def guard_installed():
-    try:
-        groups = _read_settings().get("hooks", {}).get("PreToolUse", [])
-    except (OSError, ValueError):
-        return False
-    return any("backpaw" in h.get("command", "") for g in groups for h in g.get("hooks", []))
+    _write_json(a["config"], cfg)
+    return f"{a['name']}: guard removed. Restart it."
 
 
 # ---------- transcript scan ----------
@@ -470,7 +549,7 @@ def gui():
     header = ttk.Frame(root, padding=(20, 16, 20, 8))
     header.pack(fill="x")
     ttk.Label(header, text="🐾 Backpaw", style="Title.TLabel").pack(side="left")
-    ttk.Label(header, text="  Get back what Claude deleted or moved", style="Muted.TLabel").pack(side="left", pady=(6, 0))
+    ttk.Label(header, text="  Get back what your AI agent deleted or moved", style="Muted.TLabel").pack(side="left", pady=(6, 0))
 
     def about():
         win = tk.Toplevel(root, bg=C["bg"], padx=28, pady=22)
@@ -479,10 +558,10 @@ def gui():
         win.transient(root)
         ttk.Label(win, text="🐾 Backpaw", style="Title.TLabel").pack(anchor="w")
         ttk.Label(win, text=f"Version {__version__}", style="Muted.TLabel").pack(anchor="w")
-        ttk.Label(win, text="Get back what Claude Code deleted or moved.\nRecycle Bin guard, move log, and restore.",
+        ttk.Label(win, text="Get back what AI coding agents deleted or moved.\nRecycle Bin guard, move log, and restore.",
                   justify="left").pack(anchor="w", pady=(12, 12))
-        for label, value in (("Guard", "installed" if guard_installed() else "not installed"),
-                             ("Log", str(LOG)), ("Settings", str(SETTINGS)),
+        on = [a["name"] for k, a in _agents().items() if installed(k)]
+        for label, value in (("Guard", ", ".join(on) or "off"), ("Log", str(LOG)),
                              ("Python", sys.version.split()[0]), ("Platform", sys.platform)):
             row = ttk.Frame(win)
             row.pack(fill="x", pady=1)
@@ -500,17 +579,43 @@ def gui():
     guard_lbl.pack(side="right")
 
     def refresh_guard():
-        on = guard_installed()
-        guard_lbl.configure(text="● Guard on" if on else "● Guard off", fg=C["ok"] if on else C["bad"])
-        guard_btn.configure(text="Turn off" if on else "Turn on",
-                            style="TButton" if on else "Accent.TButton", command=toggle_guard)
+        on = [a["name"] for k, a in _agents().items() if installed(k)]
+        guard_lbl.configure(text="● Guard on · " + ", ".join(on) if on else "● Guard off",
+                            fg=C["ok"] if on else C["bad"])
+        guard_btn.configure(text="Agents…", style="TButton" if on else "Accent.TButton", command=agents_dialog)
 
-    def toggle_guard():
-        on = guard_installed()
-        if on and not messagebox.askyesno("Backpaw", "Turn off the guard? Claude deletes will be permanent again."):
-            return
-        messagebox.showinfo("Backpaw", uninstall() if on else install())
-        refresh_guard()
+    def agents_dialog():
+        win = tk.Toplevel(root, bg=C["bg"], padx=24, pady=20)
+        win.title("Backpaw - agents")
+        win.transient(root)
+        win.resizable(False, False)
+        ttk.Label(win, text="AI coding agents", font=bold).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 10))
+        found = detected_agents()
+
+        def add_row(r, key, a):
+            on = installed(key)
+            state = "guard on" if on else "guard off" if key in found else "not installed"
+            ttk.Label(win, text=a["name"], width=22).grid(row=r, column=0, sticky="w", pady=4)
+            tk.Label(win, text="● " + state, bg=C["bg"], fg=C["ok"] if on else C["muted"]).grid(
+                row=r, column=1, sticky="w", padx=14)
+
+            def toggle():
+                if on and not messagebox.askyesno("Backpaw", f"Turn off the guard for {a['name']}? "
+                                                  "Its deletes will be permanent again.", parent=win):
+                    return
+                messagebox.showinfo("Backpaw", uninstall(key) if on else install(key), parent=win)
+                win.destroy()
+                refresh_guard()
+                agents_dialog()
+
+            if on or key in found:
+                ttk.Button(win, text="Turn off" if on else "Turn on", command=toggle,
+                           style="TButton" if on else "Accent.TButton").grid(row=r, column=2, sticky="e")
+
+        for r, (key, a) in enumerate(_agents().items(), start=1):
+            add_row(r, key, a)
+        ttk.Label(win, text="Restart an agent after changing its guard.", style="Muted.TLabel").grid(
+            row=99, column=0, columnspan=3, sticky="w", pady=(12, 0))
 
     # --- warnings ---
     folders = {os.path.abspath(r["cwd"]) for r in scan() if r["cwd"]} | {os.getcwd()}
@@ -635,14 +740,26 @@ def main(argv):
     elif cmd == "check":
         w = backup_warnings(args[0] if args else os.getcwd())
         print("\n".join(w) or "OK: folder is backed up.")
-    elif cmd == "install":
-        print(install())
-    elif cmd == "uninstall":
-        print(uninstall())
+    elif cmd in ("install", "uninstall"):
+        agents = _agents()
+        targets = args or (detected_agents() if cmd == "install" else [k for k in agents if installed(k)])
+        unknown = [t for t in targets if t not in agents]
+        if unknown:
+            print(f"unknown agent(s): {', '.join(unknown)}. Choose from: {', '.join(agents)}", file=sys.stderr)
+            return 1
+        for t in targets:
+            print((install if cmd == "install" else uninstall)(t))
+        if not targets:
+            print("No agents found." if cmd == "install" else "Guard is not on for any agent.")
+    elif cmd == "agents":
+        found = detected_agents()
+        for k, a in _agents().items():
+            state = "guard on" if installed(k) else "guard off" if k in found else "not installed"
+            print(f"{k:<9} {a['name']:<20} {state}")
     elif cmd in ("--version", "-V", "version"):
         print(f"backpaw {__version__}")
     elif cmd == "hook":
-        return hook()
+        return hook(args[0] if args else "claude")
     elif cmd == "gui":
         gui()
     else:

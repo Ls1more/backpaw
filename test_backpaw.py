@@ -1,4 +1,4 @@
-"""Smoke test: python test_backpaw.py  (uses a temp data dir; really trashes a temp file)."""
+"""Smoke test: python test_backpaw.py  (uses a temp data dir and fake agent configs; really trashes a temp file)."""
 import io
 import json
 import os
@@ -14,13 +14,18 @@ home = str(Path.home())
 
 
 def run_hook(command, cwd, tool="Bash"):
-    sys.stdin = io.StringIO(json.dumps({"hook_event_name": "PreToolUse", "tool_name": tool,
-                                        "tool_input": {"command": command}, "cwd": str(cwd)}))
-    sys.stderr, err = io.StringIO(), sys.stderr
+    return run_agent("claude", {"hook_event_name": "PreToolUse", "tool_name": tool,
+                                "tool_input": {"command": command}, "cwd": str(cwd)})[0]
+
+
+def run_agent(agent, payload):
+    sys.stdin = io.StringIO(json.dumps(payload))
+    out, err = io.StringIO(), io.StringIO()
+    sys.stdout, sys.stderr = out, err
     try:
-        return backpaw.hook()
+        return backpaw.hook(agent), out.getvalue(), err.getvalue()
     finally:
-        sys.stderr = err
+        sys.stdout, sys.stderr = sys.__stdout__, sys.__stderr__
 
 
 # deletes are blocked outside temp...
@@ -32,6 +37,29 @@ for cmd in ["rm -rf build", "ls && rm x", "Remove-Item foo -Recurse", "del a.txt
 for cmd in ["rm -rf scratch", "Remove-Item x.txt", "ssh root@nas 'rm -f /tmp/x'", "git rm --cached a",
             "echo firmware", "npm run format", "python backpaw.py trash a", "git status"]:
     assert run_hook(cmd, tmp) == 0, cmd
+
+# every agent's payload shape is understood, and answered in that agent's format
+blocked = {
+    "claude": {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "rm -rf src"}, "cwd": home},
+    "codex": {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": ["rm", "-rf", "src"]}, "cwd": home},
+    "gemini": {"hook_event_name": "BeforeTool", "tool_name": "run_shell_command", "tool_input": {"command": "rm -rf src"}, "cwd": home},
+    "cursor": {"hook_event_name": "beforeShellExecution", "command": "rm -rf src", "cwd": home},
+    "copilot": {"toolName": "bash", "toolArgs": {"command": "rm -rf src"}, "cwd": home},
+    "windsurf": {"agent_action_name": "pre_run_command", "tool_info": {"command_line": "rm -rf src", "cwd": home}},
+}
+for agent, payload in blocked.items():
+    code, out, err = run_agent(agent, payload)
+    if agent == "cursor":
+        assert code == 0 and json.loads(out)["permission"] == "deny", (agent, out)
+    elif agent == "copilot":
+        assert code == 0 and json.loads(out)["permissionDecision"] == "deny", (agent, out)
+    else:
+        assert code == 2 and "Backpaw blocked" in err, (agent, code, err)
+    # same payload with a harmless command is allowed silently
+    safe = json.loads(json.dumps(payload).replace("rm -rf src", "ls").replace('["rm", "-rf", "src"]', '["ls"]'))
+    assert run_agent(agent, safe) == (0, "", ""), agent
+assert run_agent("copilot", {"toolName": "edit", "toolArgs": {"path": "x"}, "cwd": home}) == (0, "", "")
+assert run_agent("copilot", {"toolName": "bash", "toolArgs": json.dumps({"command": "rm a"}), "cwd": home})[0] == 0
 
 # moves are logged, and a move onto an existing file is blocked
 (tmp / "dir").mkdir()
@@ -58,13 +86,21 @@ assert not victim.exists() and os.path.exists(t["trashed"]), t
 backpaw.restore(t)
 assert victim.read_text() == "save me"
 
-# install / uninstall round trip on a scratch settings file
-backpaw.SETTINGS = tmp / "settings.json"
+# install / uninstall every agent into a fake home, keeping unrelated hooks intact
+fake = tmp / "home"
+backpaw.HOME, backpaw.CLAUDE = fake, fake / ".claude"
+backpaw.SETTINGS = backpaw.CLAUDE / "settings.json"
+backpaw.SETTINGS.parent.mkdir(parents=True)
 backpaw.SETTINGS.write_text(json.dumps({"hooks": {"PreToolUse": [{"matcher": "Edit", "hooks": [{"type": "command", "command": "other"}]}]}}))
-backpaw.install()
-assert backpaw.guard_installed()
-backpaw.uninstall()
-assert not backpaw.guard_installed()
+assert backpaw.detected_agents() == ["claude"]
+for agent in backpaw._agents():
+    backpaw.install(agent)
+    backpaw.install(agent)  # idempotent
+    cfg = json.loads(backpaw._agents()[agent]["config"].read_text())
+    assert backpaw.installed(agent), agent
+    assert all(sum("backpaw" in json.dumps(i) for i in items) == 1 for items in cfg["hooks"].values()), (agent, cfg)
+    backpaw.uninstall(agent)
+    assert not backpaw.installed(agent), agent
 assert json.loads(backpaw.SETTINGS.read_text())["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == "other"
 
 print("all backpaw checks passed")
