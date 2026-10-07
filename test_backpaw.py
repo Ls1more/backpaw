@@ -65,22 +65,76 @@ for agent, payload in blocked.items():
 assert run_agent("copilot", {"toolName": "edit", "toolArgs": {"path": "x"}, "cwd": home}) == (0, "", "")
 assert run_agent("copilot", {"toolName": "bash", "toolArgs": json.dumps({"command": "rm a"}), "cwd": home})[0] == 0
 
-# moves are logged, and a move onto an existing file is blocked
-(tmp / "dir").mkdir()
-assert run_hook("Move-Item -Path a.txt -Destination dir", tmp, "PowerShell") == 0
-assert run_hook("mv b.txt c.txt", tmp) == 0
-(tmp / "exists.txt").write_text("x")
-assert run_hook("mv b.txt exists.txt", tmp) == 2
-moves = [(e["src"], e["dst"]) for e in backpaw.read_log() if e["op"] == "move"]
-assert moves == [(str(tmp / "a.txt"), str(tmp / "dir" / "a.txt")), (str(tmp / "b.txt"), str(tmp / "c.txt"))], moves
+# --- adversarial: ways an agent might sneak a delete, overwrite or self-disable past the guard ---
+for cmd in ['bash -c "rm -rf ~/Documents"', "powershell -Command \"Remove-Item -Recurse C:/Users/x/Documents\"",
+            'pwsh -NoProfile -c "rm -r src"', 'C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe "Remove-Item x"',
+            'find . -name "*.py" | xargs rm', "xargs -0 rm -f < list", "env FOO=1 rm -rf src", "sudo -u root rm -rf /etc",
+            "/bin/rm -rf src", "powershell -EncodedCommand UgBlAG0AbwB2AGUA", "pwsh -enc UgBlAG0A", "powershell -ec AAAA",
+            "Clear-RecycleBin -Force", "Clear-Content important.log", "git checkout -- .", "git checkout HEAD -- src",
+            "git restore src/app.py", "git stash clear", "git stash drop", "rsync -a --delete empty/ src/",
+            "robocopy empty src /MIR", "perl -e 'unlink glob(\"*\")'", "node -e \"require('fs').unlinkSync('a')\"",
+            "python -c \"from pathlib import Path; Path('a').unlink()\"", "npx rimraf src",
+            "python C:/Users/x/.backpaw/backpaw.py uninstall", "backpaw uninstall claude"]:
+    assert run_hook(cmd, home) == 2, cmd
+# ...while ordinary commands that look similar still run
+for cmd in ["bash -c 'ls -la'", "powershell -ExecutionPolicy Bypass -File build.ps1", "git restore --staged a.py",
+            "xargs echo", "env | sort", "npm run format", "git checkout main", "git stash", "rsync -a src/ dst/",
+            "python backpaw.py agents", "cp README.md README.copy.md"]:
+    assert run_hook(cmd, home) == 0, cmd
 
-# move restore round trip
-(tmp / "c.txt").write_text("moved")
+# moves/copies are checked outside temp, where overwrite protection applies
+work = Path(tempfile.mkdtemp(dir=home, prefix=".backpaw-test-"))
+(work / "dir").mkdir()
+(work / "a.txt").write_text("a")
+(work / "b.txt").write_text("b")
+(work / "exists.txt").write_text("x")
+assert run_hook("mv b.txt exists.txt", work) == 2
+assert run_hook("cp a.txt exists.txt", work) == 2
+assert run_hook("Copy-Item a.txt -Destination exists.txt", work, "PowerShell") == 2
+assert run_hook('bash -c "mv b.txt exists.txt"', work) == 2
+assert run_hook("cp a.txt new.txt", work) == 0
+assert run_hook("Move-Item -Path a.txt -Destination dir", work, "PowerShell") == 0
+assert run_hook("mv b.txt c.txt", work) == 0
+assert run_hook("mv ghost.txt d.txt", work) == 0  # source doesn't exist: allowed, but not logged
+moves = [(e["src"], e["dst"]) for e in backpaw.read_log() if e["op"] == "move"]
+assert moves == [(str(work / "a.txt"), str(work / "dir" / "a.txt")), (str(work / "b.txt"), str(work / "c.txt"))], moves
+
+# move restore round trip (the move really happens, so the file identity matches)
+os.rename(work / "b.txt", work / "c.txt")
 entry = [e for e in backpaw.read_log() if e["op"] == "move"][1]
-assert entry["status"] == "restorable"
+assert entry["status"] == "restorable", entry
 backpaw.restore(entry)
-assert (tmp / "b.txt").read_text() == "moved" and not (tmp / "c.txt").exists()
+assert (work / "b.txt").read_text() == "b" and not (work / "c.txt").exists()
 assert [e for e in backpaw.read_log() if e["id"] == entry["id"]][0]["status"] == "restored"
+
+# restore hijack: a pre-logged move "from" Startup, then a payload dropped in the workspace
+startup = os.path.expandvars(r"%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\evil.bat")
+before = len(backpaw.read_log())
+assert run_hook(f'mv "{startup}" ./payload.bat', work) == 0
+assert len(backpaw.read_log()) == before, "move of a non-existent source must not be logged"
+(work / "payload.bat").write_text("calc.exe")
+# forged log lines are refused even if written straight into the log file
+other = work / "other.txt"
+other.write_text("x")
+forged = [
+    backpaw.log({"op": "move", "src": startup, "dst": str(work / "payload.bat"), "ino": os.lstat(other).st_ino}),
+    backpaw.log({"op": "move", "src": startup, "dst": str(work / "payload.bat")}),
+    backpaw.log({"op": "trash", "path": startup, "trashed": str(work / "payload.bat")}),
+]
+for f in forged:
+    f = [e for e in backpaw.read_log() if e["id"] == f["id"]][0]
+    assert f["status"] == "suspicious", f
+    try:
+        backpaw.restore(f)
+        raise AssertionError("forged entry restored")
+    except PermissionError:
+        pass
+assert not os.path.exists(startup)
+# even a perfectly forged entry is flagged as a risky destination for the GUI's extra warning
+assert backpaw.risky_destination({"op": "move", "src": startup})
+assert backpaw.risky_destination({"op": "trash", "path": home + "/.ssh/authorized_keys"})
+assert backpaw.risky_destination({"op": "trash", "path": home + "/.bashrc"})
+assert not backpaw.risky_destination({"op": "trash", "path": home + "/Desktop/report.docx"})
 
 # real trash + restore round trip
 victim = tmp / "victim.txt"
@@ -105,6 +159,10 @@ for agent, a in backpaw._agents().items():
     backpaw.install(agent)  # idempotent
     assert backpaw.installed(agent), agent
     text = a["config"].read_text()
+    # hooks run the private copy in ~/.backpaw, not the clone (which may sit in an agent's workspace)
+    assert backpaw._installed_script().as_posix() in text and backpaw._installed_script().exists(), (agent, text)
+    assert Path(__file__).resolve().parent.as_posix() not in text, (agent, text)
+    assert not a["config"].with_suffix(a["config"].suffix + ".backpaw-tmp").exists()
     if a.get("kind") == "toml":
         cfg = tomllib.loads(text)
         assert len(cfg["hooks"]) == 1 and cfg["default_model"] == "kimi-k2", cfg
@@ -117,5 +175,10 @@ for agent, a in backpaw._agents().items():
     assert not backpaw.installed(agent), agent
 assert tomllib.loads(kimi_cfg.read_text()) == {"default_model": "kimi-k2", "models": {"kimi-k2": {"provider": "moonshot"}}}
 assert json.loads(backpaw.SETTINGS.read_text())["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == "other"
+# the backup is the config from before Backpaw ever touched it
+bak = json.loads(backpaw.SETTINGS.with_suffix(".json.backpaw-bak").read_text())
+assert "backpaw" not in json.dumps(bak) and bak["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == "other"
 
+import shutil
+shutil.rmtree(work)
 print("all backpaw checks passed")

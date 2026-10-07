@@ -27,7 +27,7 @@ import time
 import uuid
 from pathlib import Path
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 REPO_URL = "https://github.com/Ls1more/backpaw"
 
 HOME = Path.home()
@@ -42,19 +42,58 @@ TEMP = os.path.realpath(tempfile.gettempdir())
 
 DELETE_VERBS = {"rm", "rmdir", "rd", "del", "erase", "unlink", "shred", "remove-item", "ri"}
 MOVE_VERBS = {"mv", "move", "move-item", "mi"}
-# Deletes we can't attribute to specific paths: always blocked.
+COPY_VERBS = {"cp", "copy", "copy-item", "cpi", "xcopy"}
+# Prefixes that run the next word as the real command.
+WRAPPERS = {"sudo", "doas", "env", "nohup", "time", "nice", "command", "exec", "xargs", "call", "start",
+            "cmd", "/c", "&"}
+SHELLS = {"bash", "sh", "zsh", "dash", "fish", "powershell", "pwsh"}
+# Destructive commands we can't attribute to specific paths: always blocked.
 ALWAYS_BLOCK = re.compile(
-    r"\s-delete\b|rmtree|os\.(?:remove|unlink)|unlinkSync|fs\.rm|::Delete\(|\bgit\s+(?:clean\b|reset\s+--hard)",
-    re.I,
+    r"\s-delete\b|rmtree|os\.(?:remove|unlink)|\.(?:unlink|rmdir)\(|unlinkSync|fs\.rm|rimraf|::Delete\("
+    r"|File\.delete|FileUtils\.rm|\bunlink\b|Clear-RecycleBin|Clear-Content"
+    r"|\bgit\s+(?:clean\b|reset\s+--hard|checkout\s+(?:\S+\s+)?--\s|restore\b(?!.*--staged)|stash\s+(?:drop|clear))"
+    r"|\brsync\b.*\s--delete|\brobocopy\b.*\s/(?:mir|purge)\b"
+    # PowerShell -EncodedCommand (and its abbreviations) hides the real command
+    r"|\b(?:powershell|pwsh)(?:\.exe)?\b.*?\s[-/]e(?:c|n\w*)?\b",
+    re.I | re.S,
 )
 LOOSE_DELETE = re.compile(r"\b(?:" + "|".join(DELETE_VERBS) + r")\b", re.I)
 SEGMENT_SPLIT = re.compile(r"&&|\|\||[;\n|]")
 # ponytail: a command that starts with ssh is treated as remote as a whole, so
 # "ssh host x; rm local" slips through. Split segments if that ever matters.
 REMOTE_RE = re.compile(r"^\s*(ssh|plink)\b", re.I)
+SELF_DISABLE = re.compile(r"backpaw(?:\.py)?\b.*\buninstall\b", re.I | re.S)
 
 
 # ---------- command parsing ----------
+
+def _verb(tok):
+    v = os.path.basename(tok).lower()
+    return v[:-4] if v.endswith(".exe") else v
+
+
+def _unwrap(toks):
+    """Drop sudo/env/xargs/cmd /c style prefixes so toks[0] is the real command."""
+    wrapped = False
+    while toks and (_verb(toks[0]) in WRAPPERS or (wrapped and ("=" in toks[0] or toks[0].startswith("-")))):
+        wrapped = True
+        toks = toks[1:]
+    if wrapped:  # wrapper options with values (sudo -u root rm ...): jump to the first known verb
+        known = DELETE_VERBS | MOVE_VERBS | COPY_VERBS | SHELLS
+        toks = next((toks[i:] for i, t in enumerate(toks) if _verb(t) in known), toks)
+    return toks
+
+
+def _shell_payload(toks):
+    """For `bash -c "..."` / `powershell -Command ...`, return the inner command string."""
+    for i, t in enumerate(toks[1:], 1):
+        if t.lower() in ("-c", "-command", "/c", "-cmd") and i + 1 < len(toks):
+            return " ".join(toks[i + 1:])
+    if _verb(toks[0]) in ("powershell", "pwsh"):  # powershell "Remove-Item x"
+        rest = [t for t in toks[1:] if not t.startswith("-")]
+        return " ".join(rest) or None
+    return None  # bash script.sh: can't see inside
+
 
 def segments(command):
     """Yield (text, tokens) per simple command; tokens is None if it won't parse."""
@@ -64,9 +103,7 @@ def segments(command):
         except ValueError:
             yield seg, None
             continue
-        while toks and toks[0].lower() in ("sudo", "cmd", "cmd.exe", "/c", "&"):
-            toks = toks[1:]
-        yield seg, toks
+        yield seg, _unwrap(toks)
 
 
 def delete_targets(command, cwd):
@@ -81,7 +118,13 @@ def delete_targets(command, cwd):
             if LOOSE_DELETE.search(seg):
                 return None
             continue
-        if toks and toks[0].lower() in DELETE_VERBS:
+        if toks and _verb(toks[0]) in SHELLS:
+            inner = _shell_payload(toks)
+            found = delete_targets(inner, cwd) if inner else []
+            if found is None:
+                return None
+            targets += found
+        elif toks and _verb(toks[0]) in DELETE_VERBS:
             # On Windows a leading "/" is a cmd switch (del /q) or a Git Bash path we can't map: skip it,
             # which leaves no target and so blocks.
             args = [t for t in toks[1:] if not t.startswith("-") and not (IS_WIN and t.startswith("/"))]
@@ -103,10 +146,15 @@ def in_temp(path):
         return False
 
 
-def parse_moves(command, cwd):
-    """Yield (src, dst) absolute pairs for mv / Move-Item segments in a command."""
+def parse_moves(command, cwd, verbs=MOVE_VERBS):
+    """Yield (src, dst) absolute pairs for mv / Move-Item (or, with verbs=COPY_VERBS, cp) segments."""
     for _, toks in segments(command):
-        if not toks or toks[0].lower() not in MOVE_VERBS:
+        if toks and _verb(toks[0]) in SHELLS:
+            inner = _shell_payload(toks)
+            if inner:
+                yield from parse_moves(inner, cwd, verbs)
+            continue
+        if not toks or _verb(toks[0]) not in verbs:
             continue
         pos, named, it = [], {}, iter(toks[1:])
         for t in it:
@@ -158,7 +206,55 @@ def _status(e):
     held = e.get("trashed") if e["op"] == "trash" else e.get("dst")
     if not held:
         return "unknown"
-    return "restorable" if os.path.lexists(held) else "missing"
+    if not os.path.lexists(held):
+        return "missing"
+    try:
+        _verify(e)
+    except PermissionError:
+        return "suspicious"
+    return "restorable"
+
+
+def _in_trash(path):
+    p = os.path.normcase(os.path.abspath(path))
+    if IS_WIN:
+        drive = os.path.splitdrive(p)[0]
+        return p.startswith(os.path.normcase(drive + "\\$Recycle.Bin\\")) and os.path.basename(p).startswith("$r")
+    if IS_MAC:
+        return p.startswith(str(HOME / ".Trash") + "/") or bool(re.match(r"/Volumes/[^/]+/\.Trashes/", p))
+    return False
+
+
+def _verify(entry):
+    """Refuse log entries that don't describe a real Backpaw action: the log is a plain file any
+    process (including a prompt-injected agent) can append to, and restore moves files around."""
+    if entry["op"] == "trash":
+        if not _in_trash(entry["trashed"]):
+            raise PermissionError(f"{entry['trashed']} is not in the Recycle Bin/Trash; refusing to restore it")
+        if IS_WIN:  # Windows' own $I record must agree on where the item came from
+            d, name = os.path.split(entry["trashed"])
+            try:
+                orig = _read_info_file(os.path.join(d, "$I" + name[2:]))[0]
+            except (OSError, struct.error, UnicodeDecodeError):
+                orig = None
+            if not orig or orig.lower() != entry["path"].lower():
+                raise PermissionError(f"Recycle Bin record for {entry['trashed']} doesn't match {entry['path']}")
+    elif entry.get("ino") is None or os.lstat(entry["dst"]).st_ino != entry["ino"]:
+        raise PermissionError(f"{entry['dst']} is not the item that was moved; refusing to restore it")
+
+
+# Restoring into these places can make something run automatically or change an agent's rules.
+RISKY_DEST = re.compile(
+    r"[\\/](?:Start Menu|Startup|\.ssh|LaunchAgents|LaunchDaemons|System32|SysWOW64|WindowsPowerShell"
+    r"|\.git[\\/]hooks|\.claude|\.codex|\.gemini|\.cursor|\.copilot|\.qwen|\.kimi-code|\.codeium|\.backpaw"
+    r"|\.config[\\/](?:opencode|autostart|systemd))(?:[\\/]|$)"
+    r"|[\\/]\.(?:bashrc|bash_profile|zshrc|zprofile|zshenv|profile)$|[\\/]PowerShell[\\/].*profile",
+    re.I,
+)
+
+
+def risky_destination(entry):
+    return bool(RISKY_DEST.search(entry["path"] if entry["op"] == "trash" else entry["src"]))
 
 
 # ---------- trash ----------
@@ -235,8 +331,11 @@ def _find_in_recycle_bin(p, since):
 
 
 def _trash_mac(p):
-    script = f'tell application "Finder" to POSIX path of ((delete POSIX file {json.dumps(p)}) as alias)'
-    out = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
+    # The path goes in as an argument, never spliced into the script, so it can't inject AppleScript.
+    script = ["on run argv", "set f to (POSIX file (item 1 of argv)) as alias",
+              'tell application "Finder" to set t to delete f', "return POSIX path of (t as alias)", "end run"]
+    out = subprocess.run(["osascript", *[a for line in script for a in ("-e", line)], p],
+                         capture_output=True, text=True)
     if out.returncode:
         raise OSError(out.stderr.strip())
     return out.stdout.strip().rstrip("/")
@@ -253,6 +352,7 @@ def restore(entry):
         raise ValueError(f"can't restore a {entry['op']!r} entry")
     if not os.path.lexists(held):
         raise FileNotFoundError(f"{held} is missing (Recycle Bin emptied, or the move never happened)")
+    _verify(entry)
     if os.path.lexists(home):
         raise FileExistsError(f"{home} already exists; not overwriting")
     os.makedirs(os.path.dirname(home), exist_ok=True)
@@ -288,24 +388,32 @@ BLOCK_DELETE = ("Backpaw blocked a command that permanently deletes files or dis
                 "To delete files, send them to the Recycle Bin/Trash so they can be restored:\n  {trash}\n"
                 "For git clean / reset --hard: commit or stash first, or ask the user.\n"
                 "Run any remaining (non-delete) parts of the command separately.")
-BLOCK_CLOBBER = "Backpaw blocked a move that would overwrite {files}.\nSend the existing file to the Recycle Bin first:\n  {trash}"
+BLOCK_CLOBBER = ("Backpaw blocked a move/copy that would overwrite {files}.\n"
+                 "Send the existing file to the Recycle Bin first:\n  {trash}")
+BLOCK_SELF = "Backpaw can only be turned off by the user. Ask them to run the uninstall themselves."
 
 
 def guard(command, cwd):
     """Agent-independent decision: None to allow, or the reason to block. Logs allowed moves."""
     trash_cmd = f'python "{Path(__file__).resolve().as_posix()}" trash <path> [<path> ...]'
+    if SELF_DISABLE.search(command):
+        return BLOCK_SELF
     targets = delete_targets(command, cwd)
     if targets is None or (targets and not all(map(in_temp, targets))):
         return BLOCK_DELETE.format(trash=trash_cmd)
     try:
         moves = list(parse_moves(command, cwd))
+        copies = list(parse_moves(command, cwd, COPY_VERBS))
     except Exception:  # never let a parse bug crash the hook; the delete check already ran
         return None
-    clobbered = [d for _, d in moves if os.path.isfile(d)]
+    clobbered = [d for _, d in moves + copies if os.path.isfile(d) and not in_temp(d)]
     if clobbered:
         return BLOCK_CLOBBER.format(files=", ".join(clobbered), trash=trash_cmd)
     for src, dst in moves:
-        log({"op": "move", "src": src, "dst": dst, "command": command})
+        # Only log moves of things that exist now, and remember which item it was, so a
+        # crafted command can't line up a "restore" that drops a file somewhere new.
+        if os.path.lexists(src):
+            log({"op": "move", "src": src, "dst": dst, "ino": os.lstat(src).st_ino})
     return None
 
 
@@ -355,9 +463,22 @@ def hook(agent="claude"):
     return 2
 
 
+def _installed_script():
+    # Hooks run outside the agent's sandbox, so they must not run a file the agent can edit (like a
+    # clone inside a project folder). install copies Backpaw here, next to its log.
+    return DATA / "backpaw.py"
+
+
+def _copy_self():
+    target = _installed_script()
+    if Path(__file__).resolve() != target.resolve():
+        DATA.mkdir(exist_ok=True)
+        shutil.copy2(__file__, target)
+
+
 def _hook_cmd(agent, powershell=False):
     """Hook command line, quoted only where needed so one string works in bash and cmd."""
-    parts = [Path(sys.executable).as_posix(), Path(__file__).resolve().as_posix(), "hook", agent]
+    parts = [Path(sys.executable).as_posix(), _installed_script().as_posix(), "hook", agent]
     line = " ".join(f'"{p}"' if " " in p else p for p in parts)
     return "& " + line if powershell and " " in parts[0] else line
 
@@ -430,9 +551,12 @@ def _read_json(path):
 
 def _write_text(path, text):
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        shutil.copy2(path, path.with_suffix(path.suffix + ".backpaw-bak"))
-    path.write_text(text, encoding="utf-8")
+    backup = path.with_suffix(path.suffix + ".backpaw-bak")
+    if path.exists() and not backup.exists():  # keep the original from before Backpaw touched it
+        shutil.copy2(path, backup)
+    tmp = path.with_suffix(path.suffix + ".backpaw-tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)  # atomic: a crash never leaves a half-written agent config
 
 
 def _write_json(path, cfg):
@@ -461,9 +585,10 @@ def installed(agent):
 
 def install(agent):
     a = _agents()[agent]
+    _copy_self()
     if a.get("kind") == "plugin":
         js = OPENCODE_PLUGIN.replace("__PYTHON__", json.dumps(Path(sys.executable).as_posix()))
-        _write_text(a["config"], js.replace("__SCRIPT__", json.dumps(Path(__file__).resolve().as_posix())))
+        _write_text(a["config"], js.replace("__SCRIPT__", json.dumps(_installed_script().as_posix())))
         return f"{a['name']}: guard plugin written to {a['config']}. Restart it to activate."
     if a.get("kind") == "toml":
         text = TOML_BLOCK_RE.sub("\n", _read_text(a["config"])).rstrip("\n")
@@ -711,7 +836,7 @@ def gui():
         sb.pack(side="right", fill="y")
         tv.tag_configure("stripe", background=C["stripe"])
         for status, color in (("restorable", C["fg"]), ("missing", C["muted"]),
-                              ("restored", C["muted"]), ("unknown", C["muted"])):
+                              ("restored", C["muted"]), ("unknown", C["muted"]), ("suspicious", C["bad"])):
             tv.tag_configure(status, foreground=color)
         return tv
 
@@ -745,6 +870,17 @@ def gui():
         picked = [entries[i] for i in tv.selection() if entries[i]["status"] == "restorable"]
         if not picked:
             messagebox.showinfo("Backpaw", "Select one or more rows marked 'restorable'.")
+            return
+        risky = [e["path"] if e["op"] == "trash" else e["src"] for e in picked if risky_destination(e)]
+        if risky:
+            ok = messagebox.askyesno(
+                "Backpaw - check before restoring",
+                "These items go back to sensitive locations (startup, shell, SSH or agent config), where a file "
+                "can run automatically or change an agent's rules:\n\n" + "\n".join(risky[:10]) +
+                "\n\nOnly continue if you recognise them. Restore anyway?", icon="warning")
+        else:
+            ok = messagebox.askyesno("Backpaw", f"Restore {len(picked)} item(s) to their original location?")
+        if not ok:
             return
         errors = []
         for e in picked:

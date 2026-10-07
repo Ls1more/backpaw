@@ -1,4 +1,4 @@
-<p align="center"><img src="assets/logo.png" width="160" alt="Backpaw logo: a paw print inside a circular undo arrow"></p>
+<p align="center"><img src="assets/logo-dark.png" width="160" alt="Backpaw logo: a paw print inside a circular undo arrow"></p>
 
 # Backpaw 🐾
 
@@ -63,7 +63,39 @@ python backpaw.py --version
 python test_backpaw.py         # smoke test
 ```
 
-The log lives in `~/.backpaw/log.jsonl`.
+The log lives in `~/.backpaw/log.jsonl`. `install` copies Backpaw to `~/.backpaw/backpaw.py` and points
+the hooks there; after pulling a new version, run `install` again.
+
+## Security model
+
+Backpaw is a **seatbelt, not a sandbox**. It stops common accidental and injected deletes; it does not
+contain an agent that is actively trying to escape. Hooks run with your user rights, outside any agent
+sandbox, so Backpaw is built not to hand an agent anything it couldn't already do:
+
+- **Restore can't be hijacked.** Moves are logged only if the source exists, with its file ID. Restore
+  refuses any entry whose file ID doesn't match, any "trashed" item that isn't really in the Recycle
+  Bin/Trash, and (on Windows) any item whose Recycle Bin record names a different original path. Refused
+  entries show as `suspicious`.
+- **Sensitive destinations get a second warning**: Startup, shell profiles, `.ssh`, `.git/hooks`, launch
+  agents, and agent config folders.
+- **The hook runs a private copy** in `~/.backpaw`, not the clone, so an agent working in the folder where you
+  cloned Backpaw can't edit the code that runs on every command.
+- **Agents can't turn it off**: `backpaw uninstall` run by an agent is blocked.
+- **Wrappers are unwrapped**: `bash -c`, `powershell -Command`, `xargs`, `env`, `sudo`, `cmd /c`.
+  PowerShell `-EncodedCommand` is blocked outright since its contents can't be checked.
+- **No injection paths**: no shell is ever built from command text; the macOS Trash call passes the path as
+  an argument. No third-party dependencies. Agent configs are written atomically and the pre-Backpaw
+  original is kept as `*.backpaw-bak`.
+- The log stores paths only, never command text.
+
+Known gaps (by design or not yet covered):
+
+- A script file run by the agent (`python cleanup.py`, `bash nuke.sh`) can delete anything; Backpaw only
+  sees the command line.
+- Shell redirection (`> file`) can truncate a file.
+- If Python is missing or the hook crashes, most agents let the command through (Copilot CLI blocks it).
+- An agent with unrestricted file access could edit its own hook config with its file-edit tool; only the
+  shell route is blocked. Sandboxed agents can't reach those files.
 
 ## Limits
 
