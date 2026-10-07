@@ -11,7 +11,7 @@
   backpaw --version
   backpaw hook AGENT      (called by the agent) pre-command / session-start handler
 
-Agents: claude, codex, gemini, cursor, copilot, windsurf
+Agents: claude, codex, gemini, cursor, copilot, windsurf, qwen, kimi, opencode
 """
 import glob
 import json
@@ -27,7 +27,7 @@ import time
 import uuid
 from pathlib import Path
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 REPO_URL = "https://github.com/Ls1more/backpaw"
 
 HOME = Path.home()
@@ -384,18 +384,59 @@ def _agents():
                          config=HOME / ".codeium" / "windsurf" / "hooks.json", base={},
                          events={"pre_run_command": {"command": _hook_cmd("windsurf"),
                                                      "powershell": _hook_cmd("windsurf", True), "show_output": True}}),
+        "qwen": dict(name="Qwen Code", home=HOME / ".qwen", config=HOME / ".qwen" / "settings.json", base={},
+                     events={"PreToolUse": cc("qwen", "run_shell_command")}),
+        "kimi": dict(name="Kimi Code CLI", home=HOME / ".kimi-code", config=HOME / ".kimi-code" / "config.toml",
+                     kind="toml"),
+        "opencode": dict(name="OpenCode", home=HOME / ".config" / "opencode",
+                         config=HOME / ".config" / "opencode" / "plugins" / "backpaw.js", kind="plugin"),
     }
 
 
+# Kimi's config is TOML; Backpaw owns only the marked block.
+TOML_BLOCK = """# >>> backpaw
+[[hooks]]
+event = "PreToolUse"
+matcher = "Bash"
+command = '{cmd}'
+timeout = 30
+# <<< backpaw
+"""
+TOML_BLOCK_RE = re.compile(r"\n*# >>> backpaw\n.*?# <<< backpaw\n?", re.S)
+
+# OpenCode has no command hooks, only JS plugins: this one forwards bash calls to `backpaw hook`.
+OPENCODE_PLUGIN = """// Backpaw guard for OpenCode. Written by `backpaw install opencode`; remove with `backpaw uninstall opencode`.
+import { spawnSync } from "node:child_process"
+
+export const Backpaw = async ({ directory }) => ({
+  "tool.execute.before": async (input, output) => {
+    if (input.tool !== "bash") return
+    const payload = JSON.stringify({ tool_name: "Bash", tool_input: { command: output.args.command },
+                                     cwd: output.args.workdir || directory })
+    const r = spawnSync(__PYTHON__, [__SCRIPT__, "hook", "opencode"], { input: payload, encoding: "utf8" })
+    if (r.status === 2) throw new Error(r.stderr)
+  },
+})
+"""
+
+
+def _read_text(path):
+    return path.read_text(encoding="utf-8") if path.exists() else ""
+
+
 def _read_json(path):
-    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    return json.loads(_read_text(path) or "{}")
 
 
-def _write_json(path, cfg):
+def _write_text(path, text):
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         shutil.copy2(path, path.with_suffix(path.suffix + ".backpaw-bak"))
-    path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    path.write_text(text, encoding="utf-8")
+
+
+def _write_json(path, cfg):
+    _write_text(path, json.dumps(cfg, indent=2))
 
 
 def _without_backpaw(items):
@@ -407,14 +448,27 @@ def detected_agents():
 
 
 def installed(agent):
+    a = _agents()[agent]
     try:
-        return "backpaw" in json.dumps(_read_json(_agents()[agent]["config"]).get("hooks", {}))
+        if a.get("kind") == "plugin":
+            return a["config"].exists()
+        if a.get("kind") == "toml":
+            return "# >>> backpaw" in _read_text(a["config"])
+        return "backpaw" in json.dumps(_read_json(a["config"]).get("hooks", {}))
     except (OSError, ValueError):
         return False
 
 
 def install(agent):
     a = _agents()[agent]
+    if a.get("kind") == "plugin":
+        js = OPENCODE_PLUGIN.replace("__PYTHON__", json.dumps(Path(sys.executable).as_posix()))
+        _write_text(a["config"], js.replace("__SCRIPT__", json.dumps(Path(__file__).resolve().as_posix())))
+        return f"{a['name']}: guard plugin written to {a['config']}. Restart it to activate."
+    if a.get("kind") == "toml":
+        text = TOML_BLOCK_RE.sub("\n", _read_text(a["config"])).rstrip("\n")
+        _write_text(a["config"], (text + "\n\n" if text else "") + TOML_BLOCK.format(cmd=_hook_cmd(agent)))
+        return f"{a['name']}: guard installed in {a['config']}. Restart it to activate."
     cfg = _read_json(a["config"])
     for k, v in a["base"].items():
         cfg.setdefault(k, v)
@@ -429,6 +483,12 @@ def uninstall(agent):
     a = _agents()[agent]
     if not a["config"].exists():
         return f"{a['name']}: not installed."
+    if a.get("kind") == "plugin":
+        a["config"].unlink()
+        return f"{a['name']}: guard plugin removed. Restart it."
+    if a.get("kind") == "toml":
+        _write_text(a["config"], TOML_BLOCK_RE.sub("\n", _read_text(a["config"])).strip("\n") + "\n")
+        return f"{a['name']}: guard removed. Restart it."
     cfg = _read_json(a["config"])
     hooks = cfg.get("hooks", {})
     for event in list(hooks):

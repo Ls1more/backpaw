@@ -14,6 +14,13 @@ Backpaw covers that gap for every major agent:
 | Cursor | `beforeShellExecution` | `~/.cursor/hooks.json` |
 | GitHub Copilot CLI | `preToolUse` | `~/.copilot/hooks/backpaw.json` |
 | Windsurf | `pre_run_command` | `~/.codeium/windsurf/hooks.json` |
+| Qwen Code | `PreToolUse` | `~/.qwen/settings.json` |
+| Kimi Code CLI | `PreToolUse` | `~/.kimi-code/config.toml` (marked block) |
+| OpenCode | `tool.execute.before` plugin | `~/.config/opencode/plugins/backpaw.js` |
+
+Backpaw guards the **agent app**, not the model, so open-weight models (Kimi K2, Qwen3-Coder, DeepSeek,
+GLM, gpt-oss, local models via Ollama/LM Studio) are covered whenever they run inside one of these apps,
+including Claude Code pointed at an Anthropic-compatible endpoint.
 
 What it does:
 
@@ -66,5 +73,6 @@ The log lives in `~/.backpaw/log.jsonl`.
 - A command starting with `ssh` is treated as remote in full, so `ssh host x; rm local` is not caught.
 - Agent support beyond Claude Code is built from each agent's published hook docs and tested with simulated
   payloads; please report anything that misbehaves. Gemini CLI hooks may need enabling in its settings.
-- Not yet supported: Cline (hooks moved to code plugins), Aider (no hook system).
+- Not yet supported: Cline and Kilo Code (no shell-command hooks), Aider (no hook system), Crush and Goose
+  (hook support not confirmed in upstream docs).
 - macOS: the first `trash` asks for permission to control Finder (System Settings → Privacy → Automation).

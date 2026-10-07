@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import tempfile
+import tomllib
 from pathlib import Path
 
 import backpaw
@@ -46,6 +47,9 @@ blocked = {
     "cursor": {"hook_event_name": "beforeShellExecution", "command": "rm -rf src", "cwd": home},
     "copilot": {"toolName": "bash", "toolArgs": {"command": "rm -rf src"}, "cwd": home},
     "windsurf": {"agent_action_name": "pre_run_command", "tool_info": {"command_line": "rm -rf src", "cwd": home}},
+    "qwen": {"hook_event_name": "PreToolUse", "tool_name": "run_shell_command", "tool_input": {"command": "rm -rf src"}, "cwd": home},
+    "kimi": {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "rm -rf src"}, "cwd": home},
+    "opencode": {"tool_name": "Bash", "tool_input": {"command": "rm -rf src"}, "cwd": home},
 }
 for agent, payload in blocked.items():
     code, out, err = run_agent(agent, payload)
@@ -93,14 +97,25 @@ backpaw.SETTINGS = backpaw.CLAUDE / "settings.json"
 backpaw.SETTINGS.parent.mkdir(parents=True)
 backpaw.SETTINGS.write_text(json.dumps({"hooks": {"PreToolUse": [{"matcher": "Edit", "hooks": [{"type": "command", "command": "other"}]}]}}))
 assert backpaw.detected_agents() == ["claude"]
-for agent in backpaw._agents():
+kimi_cfg = backpaw._agents()["kimi"]["config"]
+kimi_cfg.parent.mkdir(parents=True)
+kimi_cfg.write_text('default_model = "kimi-k2"\n\n[models.kimi-k2]\nprovider = "moonshot"\n')
+for agent, a in backpaw._agents().items():
     backpaw.install(agent)
     backpaw.install(agent)  # idempotent
-    cfg = json.loads(backpaw._agents()[agent]["config"].read_text())
     assert backpaw.installed(agent), agent
-    assert all(sum("backpaw" in json.dumps(i) for i in items) == 1 for items in cfg["hooks"].values()), (agent, cfg)
+    text = a["config"].read_text()
+    if a.get("kind") == "toml":
+        cfg = tomllib.loads(text)
+        assert len(cfg["hooks"]) == 1 and cfg["default_model"] == "kimi-k2", cfg
+    elif a.get("kind") == "plugin":
+        assert sys.executable.replace("\\", "/") in text and '"hook", "opencode"' in text
+    else:
+        cfg = json.loads(text)
+        assert all(sum("backpaw" in json.dumps(i) for i in items) == 1 for items in cfg["hooks"].values()), (agent, cfg)
     backpaw.uninstall(agent)
     assert not backpaw.installed(agent), agent
+assert tomllib.loads(kimi_cfg.read_text()) == {"default_model": "kimi-k2", "models": {"kimi-k2": {"provider": "moonshot"}}}
 assert json.loads(backpaw.SETTINGS.read_text())["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == "other"
 
 print("all backpaw checks passed")
