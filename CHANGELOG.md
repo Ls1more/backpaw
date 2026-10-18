@@ -2,7 +2,7 @@
 
 All notable changes to Backpaw. Versions follow `MAJOR.MINOR.PATCH`.
 
-## Unreleased
+## 0.9.3 — shortcuts, local backup snapshots, split demos
 - New `backpaw shortcut` command (Windows): Desktop and Start menu shortcuts that open the window without a
   console, with the Backpaw icon (new `assets/logo.ico`) instead of Python's.
 - Code snapshots to a network share are tested (snapshot and restore over a UNC path). README and the

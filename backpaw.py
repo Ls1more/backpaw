@@ -32,7 +32,7 @@ import time
 import uuid
 from pathlib import Path
 
-__version__ = "0.9.2"
+__version__ = "0.9.3"
 REPO_URL = "https://github.com/Ls1more/backpaw"
 ICON = Path(__file__).resolve().parent / "assets" / "logo.png"
 
