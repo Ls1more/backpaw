@@ -933,6 +933,34 @@ def _copy_self():
                 shutil.copy2(ICON.with_suffix(".ico"), DATA / "assets" / "logo.ico")
 
 
+APP_ID = "Backpaw"  # Windows AppUserModelID shared by the window and its shortcuts
+
+# Sets System.AppUserModel.ID on a .lnk through its property store (no PowerShell cmdlet does this).
+_LNK_APPID_CS = r"""
+using System; using System.Runtime.InteropServices;
+[ComImport, Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IPropertyStore {
+    int GetCount(out uint count); int GetAt(uint i, out PropKey key); int GetValue(ref PropKey key, out PropVar value);
+    int SetValue(ref PropKey key, ref PropVar value); int Commit();
+}
+[StructLayout(LayoutKind.Sequential, Pack = 4)] public struct PropKey { public Guid fmtid; public uint pid; }
+[StructLayout(LayoutKind.Explicit, Size = 24)] public struct PropVar { [FieldOffset(0)] public ushort vt; [FieldOffset(8)] public IntPtr p; }
+public static class BackpawLnk {
+    [DllImport("shell32.dll")]
+    static extern int SHGetPropertyStoreFromParsingName([MarshalAs(UnmanagedType.LPWStr)] string path, IntPtr bc,
+                                                        int flags, ref Guid iid, out IPropertyStore store);
+    public static void SetAppId(string path, string id) {
+        Guid iid = new Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99"); IPropertyStore store;
+        Marshal.ThrowExceptionForHR(SHGetPropertyStoreFromParsingName(path, IntPtr.Zero, 2, ref iid, out store));
+        PropKey key = new PropKey(); key.fmtid = new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3"); key.pid = 5;
+        PropVar val = new PropVar(); val.vt = 31; val.p = Marshal.StringToCoTaskMemUni(id);
+        try { Marshal.ThrowExceptionForHR(store.SetValue(ref key, ref val)); Marshal.ThrowExceptionForHR(store.Commit()); }
+        finally { Marshal.FreeCoTaskMem(val.p); Marshal.ReleaseComObject(store); }
+    }
+}
+"""
+
+
 def make_shortcuts():
     """Desktop and Start menu shortcuts that open the window with the Backpaw icon (Windows)."""
     if not IS_WIN:
@@ -940,16 +968,19 @@ def make_shortcuts():
     _copy_self()
     pyw = Path(_python()).with_name("pythonw.exe")
     ps = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
-    # values go in through the environment, never spliced into the PowerShell text
+    # values go in through the environment, never spliced into the PowerShell text. The shortcut also gets
+    # the window's AppUserModelID ("Backpaw"), so a pinned taskbar button keeps the icon and relaunches
+    # Backpaw instead of falling back to plain pythonw.exe.
     script = ("$p = Join-Path ([Environment]::GetFolderPath($env:BP_WHERE)) 'Backpaw.lnk';"
               "$s = (New-Object -ComObject WScript.Shell).CreateShortcut($p);"
               "$s.TargetPath = $env:BP_TARGET; $s.Arguments = $env:BP_ARGS; $s.IconLocation = $env:BP_ICON;"
               "$s.WorkingDirectory = $env:BP_DIR; $s.Description = 'Backpaw: restore what AI agents deleted';"
-              "$s.Save(); $p")
+              "$s.Save(); Add-Type -TypeDefinition $env:BP_CS; [BackpawLnk]::SetAppId($p, $env:BP_AUMID); $p")
     made = []
     for where in ("Desktop", "Programs"):
         env = {**os.environ, "BP_WHERE": where, "BP_TARGET": str(pyw if pyw.exists() else Path(_python())),
-               "BP_ARGS": f'"{_installed_script()}"', "BP_ICON": str(DATA / "assets" / "logo.ico"), "BP_DIR": str(DATA)}
+               "BP_ARGS": f'"{_installed_script()}"', "BP_ICON": str(DATA / "assets" / "logo.ico"), "BP_DIR": str(DATA),
+               "BP_AUMID": APP_ID, "BP_CS": _LNK_APPID_CS}
         r = subprocess.run([str(ps), "-NoProfile", "-NonInteractive", "-Command", script], env=env,
                            capture_output=True, text=True, timeout=60)
         if r.returncode:
@@ -1197,7 +1228,7 @@ def gui():
             import ctypes
             ctypes.windll.shcore.SetProcessDpiAwareness(1)
             # own taskbar identity, so Windows shows the Backpaw icon instead of Python's
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Backpaw")
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_ID)
         except (AttributeError, OSError):
             pass
     C = DARK if _dark_mode() else LIGHT

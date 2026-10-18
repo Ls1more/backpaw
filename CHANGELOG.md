@@ -2,6 +2,10 @@
 
 All notable changes to Backpaw. Versions follow `MAJOR.MINOR.PATCH`.
 
+## Unreleased
+- `backpaw shortcut` also sets the shortcuts' Windows app ID to match the window, so pinning Backpaw to
+  the taskbar keeps its icon and relaunches Backpaw (before, the pin fell back to a plain pythonw.exe).
+
 ## 0.9.3 — shortcuts, local backup snapshots, split demos
 - New `backpaw shortcut` command (Windows): Desktop and Start menu shortcuts that open the window without a
   console, with the Backpaw icon (new `assets/logo.ico`) instead of Python's.
