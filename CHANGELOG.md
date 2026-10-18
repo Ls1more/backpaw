@@ -2,9 +2,24 @@
 
 All notable changes to Backpaw. Versions follow `MAJOR.MINOR.PATCH`.
 
-## Unreleased
-- `backpaw shortcut` also sets the shortcuts' Windows app ID to match the window, so pinning Backpaw to
-  the taskbar keeps its icon and relaunches Backpaw (before, the pin fell back to a plain pythonw.exe).
+## 0.9.4 — snapshot visibility, restore from the window, cleaner uninstall
+- **Snapshots tab**: each repo's latest snapshot, how many are kept, and whether the last attempt worked;
+  **Restore to folder…** restores the newest snapshot into a new folder (branch `backpaw-restore`), and
+  **Open snapshot folder** opens where they're saved.
+- **Snapshot failures are visible**: every attempt's result is recorded (`snapshot-status.json`), and a
+  failure in the last 24 hours (for example, a NAS share that's offline) shows in the warning banner.
+- **Secrets stay out of snapshots**: untracked `.env*` (except `.env.example`/`.sample`/`.template`/`.dist`),
+  `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.jks`, `*.keystore`, `*.kdbx`, `*.ppk`, `id_rsa`/`id_ed25519`/...,
+  `.npmrc`, `.pypirc`, `.netrc`, `.git-credentials` and `credentials(.json)` are skipped even if `.gitignore`
+  misses them. Files git already tracks are unaffected (they're in history anyway).
+- **`backpaw uninstall --all`**: removes every agent's hooks, the Desktop and Start menu shortcuts, and
+  Backpaw's program files; keeps your log, settings, snapshot status and snapshots.
+- **Settings and snapshot status are saved atomically**, so a crash mid-save can't reset your settings.
+- **Fewer false positives**: the "agents can't uninstall Backpaw" rule now only triggers when a command
+  actually runs `backpaw uninstall` (also inside `bash -c` / `powershell -Command`), not when the text merely
+  mentions it, for example in a commit message.
+- **Taskbar pins keep the icon**: `backpaw shortcut` sets the shortcuts' Windows app ID to match the window,
+  so pinning Backpaw keeps its icon and relaunches Backpaw (before, the pin fell back to plain pythonw.exe).
 
 ## 0.9.3 — shortcuts, local backup snapshots, split demos
 - New `backpaw shortcut` command (Windows): Desktop and Start menu shortcuts that open the window without a

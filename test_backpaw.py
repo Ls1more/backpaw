@@ -77,6 +77,12 @@ for cmd in ["mv ~/.backpaw ~/.backpaw-old", "cat ~/.claude/settings.json", "note
     assert code == 0 and json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "ask", (cmd, out)
 assert run_hook(f'"{sys.executable}" "{home}/.backpaw/backpaw.py" trash x.txt', tmp) == 0  # Backpaw's own trash
 assert run_hook(f'python "{home}/.backpaw/backpaw.py" agents', home) == 0
+# running uninstall is blocked; merely mentioning it (commit message, echo) is not
+for cmd in ["python backpaw.py uninstall", "python ~/.backpaw/backpaw.py uninstall --all", "backpaw uninstall claude",
+            "bash -c 'python backpaw.py uninstall'"]:
+    assert run_hook(cmd, home) == 2, cmd
+for cmd in ['git commit -m "docs: backpaw uninstall --all"', "echo 'run backpaw uninstall to remove it'"]:
+    assert run_hook(cmd, home) == 0, cmd
 
 # every agent's payload shape is understood, and answered in that agent's format
 blocked = {
@@ -344,6 +350,26 @@ bak = json.loads(backpaw.SETTINGS.with_suffix(".json.backpaw-bak").read_text())
 assert "backpaw" not in json.dumps(bak) and bak["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == "other"
 backpaw.DATA = real_data
 
+# v0.9.4: 'uninstall --all' removes hooks, shortcuts and program files, but keeps the user's log and settings
+desk, progs = tmp / "fake-desktop", tmp / "fake-programs"
+desk.mkdir(), progs.mkdir()
+(desk / "Backpaw.lnk").write_text("x"), (progs / "Backpaw.lnk").write_text("x")
+real_shell_folder = backpaw._shell_folder
+backpaw._shell_folder = lambda name: {"Desktop": desk, "Programs": progs}[name]  # never the real ones
+try:
+    backpaw.install("claude")
+    backpaw.install("cursor")
+    assert backpaw._installed_script().exists() and backpaw.installed("claude")
+    backpaw.full_uninstall()
+finally:
+    backpaw._shell_folder = real_shell_folder
+assert not backpaw.installed("claude") and not backpaw.installed("cursor")
+assert not backpaw._installed_script().exists() and not (backpaw.DATA / "assets").exists()
+if backpaw.IS_WIN:
+    assert not (desk / "Backpaw.lnk").exists() and not (progs / "Backpaw.lnk").exists()
+assert backpaw.LOG.exists() and (backpaw.DATA / "settings.json").exists()  # user data kept
+assert json.loads(backpaw.SETTINGS.read_text())["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == "other"
+
 # git reminders: local-only work gets flagged; a pushed repo counts as backed up (no OneDrive nag)
 import subprocess
 old = {"GIT_AUTHOR_DATE": "2026-01-01T12:00:00", "GIT_COMMITTER_DATE": "2026-01-01T12:00:00"}
@@ -444,6 +470,39 @@ try:
 except OSError:
     pass
 git(repo, "config", "--unset", "core.worktree")
+
+# v0.9.4: untracked secret files stay out of snapshots even when .gitignore misses them
+for name, keep_it in [(".env.local", False), ("deploy.pem", False), ("id_rsa", False), (".npmrc", False),
+                      ("server.key", False), (".env.example", True), ("config.py", True)]:
+    (repo / name).write_text("x")
+r4 = backpaw.restore_snapshot(backpaw.snapshot(repo, dest=tmp / "snaps4"), tmp / "restored4")
+for name, keep_it in [(".env.local", False), ("deploy.pem", False), ("id_rsa", False), (".npmrc", False),
+                      ("server.key", False), (".env.example", True), ("config.py", True)]:
+    assert (r4 / name).exists() == keep_it, name
+# v0.9.4: each snapshot's outcome is recorded for the window; non-repos aren't reported
+backpaw._save_prefs(snapshot_dir=str(tmp / "snaps5"))
+backpaw.run_snapshot(repo)
+st = backpaw.snapshot_status()[os.path.normcase(backpaw._git(repo, "rev-parse", "--show-toplevel"))]
+assert st["ok"] and st["detail"].endswith(".bundle") and backpaw.snapshot_failures() == [], st
+(tmp / "not-a-folder").write_text("a file, so the snapshot folder can't be created")
+backpaw._save_prefs(snapshot_dir=str(tmp / "not-a-folder" / "snaps"))
+try:
+    backpaw.run_snapshot(repo)
+    raise AssertionError("snapshot into an impossible folder succeeded")
+except OSError:
+    pass
+fails = backpaw.snapshot_failures()
+assert len(fails) == 1 and not fails[0]["ok"] and fails[0]["repo"] == repo.name, fails
+before = backpaw.snapshot_status()
+try:
+    backpaw.run_snapshot(work)  # not a repo
+except OSError:
+    pass
+assert backpaw.snapshot_status() == before
+backpaw._save_prefs(snapshot_dir="")
+# v0.9.4: settings are written atomically (no temp files left behind, file always valid JSON)
+assert json.loads((backpaw.DATA / "settings.json").read_text())["snapshot_dir"] == ""
+assert not list(backpaw.DATA.glob("*.tmp"))
 # snapshots need a folder; off by default
 try:
     backpaw.snapshot(repo)

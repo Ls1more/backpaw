@@ -60,9 +60,12 @@ What it does:
   git bundle file into a folder you choose: a local backup such as a NAS share
   (`\\local-backup\backups\Backpaw snapshots`) or a mapped drive, another disk, or a folder that syncs to the
   cloud (OneDrive, iCloud Drive, Dropbox). It respects `.gitignore`, keeps the newest 5 per repo, and never
-  touches your branches, staging area or files. `backpaw restore-snapshot` brings everything back in a new
-  folder. For a network share, make sure Windows can already open it (saved credentials or a mapped drive);
-  if it's unreachable, that snapshot is skipped and retried 30 minutes later.
+  touches your branches, staging area or files. Untracked files that usually hold secrets (`.env`, `*.pem`,
+  `*.key`, `id_rsa`, `.npmrc`, ...) are left out even if `.gitignore` misses them. The **Snapshots** tab shows
+  each repo's latest snapshot and whether the last attempt worked, and **Restore to folder…** brings one back
+  into a new folder (or use `backpaw restore-snapshot`). A failed snapshot also shows in the warning banner.
+  For a network share, make sure Windows can already open it (saved credentials or a mapped drive); if it's
+  unreachable, the failure is shown and the snapshot is retried 30 minutes later.
 - **Session history**: lists deletes and moves from past Claude Code sessions (`~/.claude/projects`).
 - **Backup check**: warns at session start (Claude Code, Codex, Gemini CLI) and in the window when work
   isn't backed up. For **git projects**, pushing is the backup: Backpaw reminds you if the repo has no remote,
@@ -99,6 +102,7 @@ cd backpaw
 python backpaw.py install            # guard every agent found on this machine (configs are backed up first)
 python backpaw.py install cursor     # or pick agents
 python backpaw.py uninstall          # remove it everywhere
+python backpaw.py uninstall --all    # also remove shortcuts and Backpaw's program files (keeps your log and snapshots)
 ```
 
 Restart the agent after installing. You can also turn the guard on or off per agent from the window
@@ -227,13 +231,19 @@ Backpaw makes **no network connections** and collects nothing: no telemetry, no 
 What it writes stays on your machine:
 
 - `~/.backpaw/`: the log (`log.jsonl`, file paths only, never command text), your settings
-  (`settings.json`), snapshot timing (`snapshot-times.json`), and the private copy of Backpaw the hooks run.
+  (`settings.json`), snapshot timing and results (`snapshot-times.json`, `snapshot-status.json`), and the
+  private copy of Backpaw the hooks run (with its icon).
+- On Windows, if you run `backpaw shortcut`: a **Backpaw** shortcut on your Desktop and in the Start menu.
 - Your agents' config files: the hook entries Backpaw adds, with the pre-Backpaw original kept next to each
   as `*.backpaw-bak`.
 - **Code snapshots, only if you turn them on**: bundles of your repos (history, uncommitted edits, new files
   not in `.gitignore`) in the folder you choose. If that folder is synced (OneDrive, iCloud Drive, Dropbox),
   your sync app uploads them to that service; Backpaw itself never does. Check that your employer allows
-  work code in that location, and add secrets to `.gitignore` so they stay out of snapshots.
+  work code in that location. Common secret files are skipped automatically, but add any others to
+  `.gitignore` so they stay out of snapshots.
+
+`backpaw uninstall --all` removes the hooks, shortcuts and Backpaw's program files. Your log, settings and
+snapshots are kept; delete `~/.backpaw` and your snapshot folder yourself if you want them gone too.
 The only web link it opens is this repository, when you click it in the About box. Its other buttons open
 Windows' own Recycle Bin, System Protection and backup settings.
 

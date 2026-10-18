@@ -12,6 +12,7 @@
   backpaw agents          list supported AI agents and whether the guard is on
   backpaw install [AGENT...]    turn the guard on (default: every agent found)
   backpaw uninstall [AGENT...]  turn it off (default: everywhere it is on)
+  backpaw uninstall --all       remove hooks, shortcuts and program files (keeps your log and snapshots)
   backpaw --version
   backpaw hook AGENT      (called by the agent) pre-command / session-start handler
 
@@ -32,7 +33,7 @@ import time
 import uuid
 from pathlib import Path
 
-__version__ = "0.9.3"
+__version__ = "0.9.4"
 REPO_URL = "https://github.com/Ls1more/backpaw"
 ICON = Path(__file__).resolve().parent / "assets" / "logo.png"
 
@@ -582,6 +583,12 @@ SNAPSHOT_EVERY = 30 * 60  # seconds between automatic snapshots of one folder
 SNAPSHOT_KEEP = 5          # newest bundles kept per repo
 SNAPSHOT_MAX_BYTES = 100 * 1024 * 1024  # skip bigger files (GitHub's own per-file limit)
 SNAPSHOT_GAP = 60          # seconds between any two background snapshots, whatever the folder
+# Untracked files that usually hold secrets; snapshots skip them (tracked ones are already in git history).
+SECRET_FILE = re.compile(
+    r"^\.env(?!\.(?:example|sample|template|dist)$)(?:\..+)?$|\.(?:pem|key|p12|pfx|jks|keystore|kdbx|ppk)$"
+    r"|^id_(?:rsa|dsa|ecdsa|ed25519)$|^\.(?:npmrc|pypirc|netrc|git-credentials)$|^credentials(?:\.json)?$",
+    re.I)
+SNAPSHOT_STATUS = "snapshot-status.json"
 SNAPSHOT_REF = "refs/backpaw/snapshot"
 
 
@@ -642,8 +649,8 @@ def snapshot(folder, dest=None):
             else:
                 entries[path] = b"100755" if mode == b"100755" else b"100644"
     for path in run("ls-files", "-z", "--others", "--exclude-standard").split(b"\0"):
-        if path:
-            entries.setdefault(path, b"100644")
+        if path and not SECRET_FILE.search(os.path.basename(os.fsdecode(path))):
+            entries.setdefault(path, b"100644")  # untracked secrets stay out even if .gitignore misses them
     # current contents from disk; deleted files drop out; links, files outside the repo, files over the size
     # limit and odd names are skipped
     files = [p for p in entries if b"\n" not in p and inside(p)]
@@ -664,7 +671,7 @@ def snapshot(folder, dest=None):
                      f"Backpaw snapshot {time.strftime('%Y-%m-%d %H:%M:%S')}", env=env).strip().decode()
     run("update-ref", SNAPSHOT_REF, commit)
 
-    slot = dest / f"{Path(top).name}-{hashlib.sha1(os.path.normcase(top).encode()).hexdigest()[:8]}"
+    slot = dest / _slot_name(top)
     slot.mkdir(parents=True, exist_ok=True)
     out = slot / f"{time.strftime('%Y%m%d-%H%M%S')}-{int(time.time() * 1000) % 1000:03d}.bundle"
     part = out.with_suffix(".partial")
@@ -674,6 +681,50 @@ def snapshot(folder, dest=None):
     for old in sorted(slot.glob("*.bundle"))[:-SNAPSHOT_KEEP]:
         old.unlink()
     return out
+
+
+def _slot_name(top):
+    return f"{Path(top).name}-{hashlib.sha1(os.path.normcase(top).encode()).hexdigest()[:8]}"
+
+
+def snapshot_status():
+    """{repo path: {repo, slot, time, ok, detail}} for the latest snapshot attempt of each repo."""
+    try:
+        data = json.loads((DATA / SNAPSHOT_STATUS).read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def record_snapshot(folder, bundle=None, error=None):
+    """Remember how the latest snapshot of folder's repo went, so the window can show it."""
+    top = _git(folder, "rev-parse", "--show-toplevel")
+    if not top:
+        return  # not a git repo: nothing to snapshot, nothing to report
+    status = snapshot_status()
+    status[os.path.normcase(top)] = {"repo": Path(top).name, "slot": _slot_name(top), "time": time.time(),
+                                     "ok": error is None, "detail": str(bundle if error is None else error)}
+    try:
+        _save_json_atomic(DATA / SNAPSHOT_STATUS, status)
+    except OSError:
+        pass
+
+
+def snapshot_failures(within=24 * 3600):
+    now = time.time()
+    return [s for s in snapshot_status().values()
+            if isinstance(s, dict) and not s.get("ok") and now - s.get("time", 0) < within]
+
+
+def run_snapshot(folder):
+    """Snapshot and record the outcome (what the hook's background process runs)."""
+    try:
+        bundle = snapshot(folder)
+    except (OSError, subprocess.TimeoutExpired) as ex:
+        record_snapshot(folder, error=ex)
+        raise OSError(str(ex)) from ex
+    record_snapshot(folder, bundle=bundle)
+    return bundle
 
 
 def maybe_snapshot(cwd):
@@ -730,10 +781,27 @@ BLOCK_CLOBBER = ("Backpaw blocked a move/copy that would overwrite {files}.\n"
 BLOCK_SELF = "Backpaw can only be turned off by the user. Ask them to run the uninstall themselves."
 
 
+def _runs_uninstall(command):
+    """True if the command actually runs `backpaw uninstall` (directly or via bash -c / powershell -Command),
+    not merely mentions it, e.g. in a commit message."""
+    for seg, toks in segments(command):
+        if toks is None:
+            if SELF_DISABLE.search(seg):  # can't parse it: fall back to the text
+                return True
+            continue
+        if toks and _verb(toks[0]) in SHELLS:
+            inner = _shell_payload(toks)
+            if inner and _runs_uninstall(inner):
+                return True
+        if any(_verb(t) in ("backpaw", "backpaw.py") and nxt == "uninstall" for t, nxt in zip(toks, toks[1:])):
+            return True
+    return False
+
+
 def guard(command, cwd):
     """Agent-independent decision: None to allow, or the reason to block. Logs allowed moves."""
     trash_cmd = f'"{_python()}" "{Path(__file__).resolve().as_posix()}" trash <path> [<path> ...]'
-    if SELF_DISABLE.search(command):
+    if _runs_uninstall(command):
         return BLOCK_SELF
     targets = delete_targets(command, cwd)
     if targets is None or (targets and not all(in_temp(t) or allowed_delete(t, cwd) for t in targets)):
@@ -961,13 +1029,46 @@ public static class BackpawLnk {
 """
 
 
+def _powershell():
+    return Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+
+
+def _shell_folder(name):
+    """Windows special folder ("Desktop", "Programs"), honoring OneDrive/redirected folders."""
+    r = subprocess.run([str(_powershell()), "-NoProfile", "-NonInteractive", "-Command",
+                        "[Environment]::GetFolderPath($env:BP_WHERE)"], env={**os.environ, "BP_WHERE": name},
+                       capture_output=True, text=True, timeout=60)
+    return Path(r.stdout.strip()) if r.returncode == 0 and r.stdout.strip() else None
+
+
+def full_uninstall():
+    """Everything Backpaw installed: agent hooks, shortcuts and its program files. Your log, settings,
+    snapshot status and snapshot bundles are left in place."""
+    done = [uninstall(a) for a in _agents() if installed(a)]
+    if IS_WIN:
+        for where in ("Desktop", "Programs"):
+            folder = _shell_folder(where)
+            lnk = folder / "Backpaw.lnk" if folder else None
+            if lnk and lnk.exists():
+                lnk.unlink()
+                done.append(f"Removed shortcut {lnk}")
+    for item in (_installed_script(), DATA / "assets", DATA / "snapshot-times.json"):
+        if item.is_dir():
+            shutil.rmtree(item)
+        elif item.exists():
+            item.unlink()
+    done.append(f"Removed Backpaw's program files from {DATA}. Kept your log, settings and snapshot status "
+                "there, and any snapshots in your snapshot folder; delete them yourself if you want them gone.")
+    return done
+
+
 def make_shortcuts():
     """Desktop and Start menu shortcuts that open the window with the Backpaw icon (Windows)."""
     if not IS_WIN:
         raise OSError("shortcuts are only made on Windows; on macOS run: python3 backpaw.py")
     _copy_self()
     pyw = Path(_python()).with_name("pythonw.exe")
-    ps = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    ps = _powershell()
     # values go in through the environment, never spliced into the PowerShell text. The shortcut also gets
     # the window's AppUserModelID ("Backpaw"), so a pinned taskbar button keeps the icon and relaunches
     # Backpaw instead of falling back to plain pythonw.exe.
@@ -1200,10 +1301,16 @@ def _load_prefs():
         return {}
 
 
+def _save_json_atomic(path, obj):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(obj), encoding="utf-8")
+    os.replace(tmp, path)  # a crash mid-save never leaves a half-written file
+
+
 def _save_prefs(**prefs):
     try:
-        DATA.mkdir(parents=True, exist_ok=True)
-        (DATA / "settings.json").write_text(json.dumps({**_load_prefs(), **prefs}), encoding="utf-8")
+        _save_json_atomic(DATA / "settings.json", {**_load_prefs(), **prefs})
     except OSError:
         pass
 
@@ -1363,6 +1470,8 @@ def gui():
         for child in banner_slot.winfo_children():
             child.destroy()
         warnings = sorted({w for f in folders for w in backup_warnings(f)})
+        warnings += [f"Last snapshot of {s.get('repo', '?')} failed: {str(s.get('detail', ''))[:160]}"
+                     for s in snapshot_failures()]
         if not warnings:
             return
         bar = tk.Frame(banner_slot, bg=C["warn_bg"], padx=14, pady=10)
@@ -1476,6 +1585,7 @@ def gui():
             _save_prefs(stale_days=STALE_CHOICES[days.current()], allowed_dirs=names, ask_api=ask.get(),
                         snapshot_dir=folder)
             build_banner()
+            refresh_snaps()
             win.destroy()
 
         btns = ttk.Frame(win)
@@ -1507,8 +1617,10 @@ def gui():
         return tv
 
     restore_tab = ttk.Frame(tabs, style="Card.TFrame", padding=12)
+    snap_tab = ttk.Frame(tabs, style="Card.TFrame", padding=12)
     history_tab = ttk.Frame(tabs, style="Card.TFrame", padding=12)
     tabs.add(restore_tab, text="Restore")
+    tabs.add(snap_tab, text="Snapshots")
     tabs.add(history_tab, text="Session history")
 
     btns = ttk.Frame(restore_tab, style="Card.TFrame")
@@ -1549,6 +1661,11 @@ def gui():
             seen.update(stamp=stamp, full=time.time())
             refresh()
             refresh_guard()
+            refresh_snaps()
+            failed = sorted((s.get("slot"), s.get("time")) for s in snapshot_failures())
+            if failed != seen.get("failed", failed):  # a snapshot started or stopped failing
+                build_banner()
+            seen["failed"] = failed
         root.after(2000, poll)
 
     root.bind("<FocusIn>", lambda e: seen.update(full=0) if e.widget is root else None)
@@ -1589,6 +1706,62 @@ def gui():
     count_lbl = ttk.Label(btns, style="Muted.TLabel", background=C["card"])
     count_lbl.pack(side="left")
 
+    # --- snapshots tab: newest snapshot per repo, its status, and restore into a new folder ---
+    sbtns = ttk.Frame(snap_tab, style="Card.TFrame")
+    sbtns.pack(side="bottom", fill="x", pady=(10, 0))
+    sv = table(snap_tab, ("repo", "last snapshot", "kept", "status"), (260, 175, 60, 520))
+    newest = {}
+
+    def refresh_snaps():
+        selected = set(sv.selection())
+        sv.delete(*sv.get_children())
+        newest.clear()
+        status = {s.get("slot"): s for s in snapshot_status().values() if isinstance(s, dict)}
+        slots = {name: bundles for name, bundles in list_snapshots()}
+        for n, slot in enumerate(sorted(set(slots) | set(status), key=str.lower)):
+            bundles, rec = slots.get(slot, []), status.get(slot, {})
+            if bundles:
+                newest[slot] = bundles[-1]
+            when = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(bundles[-1]))) if bundles else "-"
+            state = ("ok" if rec.get("ok", True) else f"last attempt failed: {str(rec.get('detail', ''))[:200]}")
+            repo = rec.get("repo") or slot.rsplit("-", 1)[0]
+            tags = ("restorable" if bundles else "missing",) + (("stripe",) if n % 2 else ())
+            sv.insert("", "end", iid=slot, values=(repo, when, len(bundles), state), tags=tags)
+        sv.selection_set([i for i in selected if sv.exists(i)])
+        d = snapshot_dir()
+        snap_lbl.configure(text=f"Saving to {d}" if d else "Snapshots are off. Choose a folder in Settings to turn them on.")
+
+    def restore_selected_snapshot():
+        picked = [s for s in sv.selection() if s in newest]
+        if len(picked) != 1:
+            messagebox.showinfo("Backpaw", "Select one repo that has a snapshot.")
+            return
+        from tkinter import filedialog
+        parent = filedialog.askdirectory(title="Restore the snapshot into which folder?")
+        if not parent:
+            return
+        repo = sv.set(picked[0], "repo")
+        dest = Path(parent) / f"{repo}-restored-{time.strftime('%Y%m%d-%H%M%S')}"
+        root.configure(cursor="watch")
+        root.update()
+        try:
+            restore_snapshot(newest[picked[0]], dest)
+        except (OSError, subprocess.TimeoutExpired) as ex:
+            messagebox.showerror("Backpaw", f"Couldn't restore the snapshot:\n\n{ex}")
+            return
+        finally:
+            root.configure(cursor="")
+        messagebox.showinfo("Backpaw", f"Restored {repo} into:\n{dest}\n\nIt's on branch 'backpaw-restore', with "
+                                       "uncommitted edits and new files included as one commit.")
+        open_path(str(dest))
+
+    ttk.Button(sbtns, text="Restore to folder…", style="Accent.TButton",
+               command=restore_selected_snapshot).pack(side="right")
+    ttk.Button(sbtns, text="Open snapshot folder",
+               command=lambda: snapshot_dir() and open_path(str(snapshot_dir()))).pack(side="right", padx=6)
+    snap_lbl = ttk.Label(sbtns, style="Muted.TLabel", background=C["card"])
+    snap_lbl.pack(side="left")
+
     hbtns = ttk.Frame(history_tab, style="Card.TFrame")
     hbtns.pack(side="bottom", fill="x", pady=(10, 0))
     ttk.Label(hbtns, style="Muted.TLabel", background=C["card"],
@@ -1604,6 +1777,7 @@ def gui():
 
     refresh_guard()
     refresh()
+    refresh_snaps()
     root.mainloop()
 
 
@@ -1629,7 +1803,7 @@ def main(argv):
         print("\n".join(w) or "OK: folder is backed up.")
     elif cmd == "snapshot":
         try:
-            print("snapshot:", snapshot(args[0] if args else os.getcwd()))
+            print("snapshot:", run_snapshot(args[0] if args else os.getcwd()))
         except OSError as ex:
             print("error:", ex, file=sys.stderr)
             return 1
@@ -1655,6 +1829,9 @@ def main(argv):
         except OSError as ex:
             print("error:", ex, file=sys.stderr)
             return 1
+    elif cmd == "uninstall" and args == ["--all"]:
+        for line in full_uninstall():
+            print(line)
     elif cmd in ("install", "uninstall"):
         agents = _agents()
         targets = args or (detected_agents() if cmd == "install" else [k for k in agents if installed(k)])
