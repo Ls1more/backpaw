@@ -1398,8 +1398,8 @@ def gui():
             label = "Use OneDrive" if IS_WIN else "Use iCloud Drive"
             ttk.Button(snap_row, text=label, command=lambda: snap.set(str(suggested))).pack(side="left", padx=(6, 0))
         ttk.Label(win, text="Every 30 minutes while an agent works in a git repo, its history, uncommitted edits "
-                  "and new files are saved here.\nPick a folder that syncs to the cloud or lives on another drive. "
-                  "Restore with: backpaw restore-snapshot", style="Muted.TLabel", justify="left").grid(
+                  "and new files are saved here.\nPick a local backup (NAS share, another drive) or a folder that "
+                  "syncs to the cloud. Restore with: backpaw restore-snapshot", style="Muted.TLabel", justify="left").grid(
             row=10, column=0, columnspan=2, sticky="w", pady=(0, 14))
 
         def save():

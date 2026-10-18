@@ -57,9 +57,12 @@ What it does:
 - **Code snapshots** (opt-in): unpushed commits, uncommitted edits and new files exist only on your machine
   until you push, so anything that wipes the disk (an antivirus false positive, a bad script) takes them
   with it. While an agent works in a git repo, Backpaw saves the repo's full state every 30 minutes as one
-  git bundle file into a folder you choose, ideally one that syncs off the machine (OneDrive, iCloud Drive,
-  Dropbox, a NAS, another drive). It respects `.gitignore`, keeps the newest 5 per repo, and never touches
-  your branches, staging area or files. `backpaw restore-snapshot` brings everything back in a new folder.
+  git bundle file into a folder you choose: a local backup such as a NAS share
+  (`\\local-backup\backups\Backpaw snapshots`) or a mapped drive, another disk, or a folder that syncs to the
+  cloud (OneDrive, iCloud Drive, Dropbox). It respects `.gitignore`, keeps the newest 5 per repo, and never
+  touches your branches, staging area or files. `backpaw restore-snapshot` brings everything back in a new
+  folder. For a network share, make sure Windows can already open it (saved credentials or a mapped drive);
+  if it's unreachable, that snapshot is skipped and retried 30 minutes later.
 - **Session history**: lists deletes and moves from past Claude Code sessions (`~/.claude/projects`).
 - **Backup check**: warns at session start (Claude Code, Codex, Gemini CLI) and in the window when work
   isn't backed up. For **git projects**, pushing is the backup: Backpaw reminds you if the repo has no remote,
@@ -128,7 +131,7 @@ Open **Settings** in the window. Saved in `~/.backpaw/settings.json` and used by
 | Folders deleted directly | `node_modules`, `dist`, `build`, `.venv`, `venv`, `__pycache__`, `.next`, `target`, `.pytest_cache`, `.cache` | Build output and caches that skip the Recycle Bin. Deletes here are **permanent**. Plain folder names only; matched on the folder being deleted or one inside the project on the way to it, never a parent above it, and links are judged by where they really point. |
 
 | Ask before destructive cloud / API / database commands | On | Confirmation (or a block telling the agent to ask) for the commands and MCP tools listed above. |
-| Code snapshots folder | Off (empty) | Where repo snapshots go. **Use OneDrive** / **Use iCloud Drive** fills in a synced folder; any absolute path works. Off by default so work code never lands in a cloud account you didn't choose. |
+| Code snapshots folder | Off (empty) | Where repo snapshots go: a NAS share (`\\server\share\folder`), a mapped or second drive, or a synced folder (**Use OneDrive** / **Use iCloud Drive** fills one in). Any absolute path works. Off by default so work code never lands somewhere you didn't choose. |
 
 The "Not backed up" banner can be collapsed with **Hide**; that choice is remembered too.
 

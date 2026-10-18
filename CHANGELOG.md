@@ -2,6 +2,11 @@
 
 All notable changes to Backpaw. Versions follow `MAJOR.MINOR.PATCH`.
 
+## Unreleased
+- Code snapshots to a network share are tested (snapshot and restore over a UNC path). README and the
+  Settings hint now present a local backup (NAS share, another drive) alongside cloud folders.
+- Demo GIF shows a local backup share (`\\local-backup\backups\Backpaw snapshots`) as the snapshot folder.
+
 ## 0.9.2 — docs and demo refresh
 - Demo GIF rebuilt from the current version, with two new scenes: "ask first" for a `terraform destroy`,
   and the Settings dialog turning on code snapshots.
