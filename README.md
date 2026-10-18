@@ -196,10 +196,19 @@ Known gaps (by design or not yet covered):
 
 ## Privacy
 
-Backpaw makes **no network connections** and collects nothing. Everything stays on your machine: the log
-(`~/.backpaw/log.jsonl`, file paths only), your settings (`~/.backpaw/settings.json`), and the hook entries
-it adds to your agents' config files.
-The only link it opens is this repository, when you click it in the About box.
+Backpaw makes **no network connections** and collects nothing: no telemetry, no accounts, no servers.
+What it writes stays on your machine:
+
+- `~/.backpaw/`: the log (`log.jsonl`, file paths only, never command text), your settings
+  (`settings.json`), snapshot timing (`snapshot-times.json`), and the private copy of Backpaw the hooks run.
+- Your agents' config files: the hook entries Backpaw adds, with the pre-Backpaw original kept next to each
+  as `*.backpaw-bak`.
+- **Code snapshots, only if you turn them on**: bundles of your repos (history, uncommitted edits, new files
+  not in `.gitignore`) in the folder you choose. If that folder is synced (OneDrive, iCloud Drive, Dropbox),
+  your sync app uploads them to that service; Backpaw itself never does. Check that your employer allows
+  work code in that location, and add secrets to `.gitignore` so they stay out of snapshots.
+The only web link it opens is this repository, when you click it in the About box. Its other buttons open
+Windows' own Recycle Bin, System Protection and backup settings.
 
 ## Changelog
 
