@@ -164,6 +164,11 @@ Known gaps (by design or not yet covered):
 - Not yet supported: Cline and Kilo Code (no shell-command hooks), Aider (no hook system), Crush and Goose
   (hook support not confirmed in upstream docs).
 - macOS: the first `trash` asks for permission to control Finder (System Settings → Privacy → Automation).
+- Antivirus/EDR (SentinelOne, Defender, CrowdStrike, ...) runs below every app, Backpaw included, and that's
+  by design. Files it quarantines or removes never pass through Backpaw: restore them from your security
+  console. Its rollback depends on shadow copies, which security tools and Windows itself can delete or
+  rotate, so treat neither the Recycle Bin nor shadow copies as a backup. Only copies **off the machine**
+  (OneDrive, a git remote, a NAS) survive this.
 
 ## Privacy
 
