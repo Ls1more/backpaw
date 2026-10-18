@@ -3,6 +3,8 @@
 All notable changes to Backpaw. Versions follow `MAJOR.MINOR.PATCH`.
 
 ## Unreleased
+- New `backpaw shortcut` command (Windows): Desktop and Start menu shortcuts that open the window without a
+  console, with the Backpaw icon (new `assets/logo.ico`) instead of Python's.
 - Code snapshots to a network share are tested (snapshot and restore over a UNC path). README and the
   Settings hint now present a local backup (NAS share, another drive) alongside cloud folders.
 - Demos split by workflow: `demo.gif` shows block → Recycle Bin → restore; a new `demo-ask-first.gif`

@@ -8,6 +8,7 @@
   backpaw snapshot [DIR]  save a snapshot of DIR's git repo now (needs a snapshot folder in Settings)
   backpaw snapshots       list saved snapshots
   backpaw restore-snapshot BUNDLE DEST   recreate a repo, uncommitted work included, in a new folder
+  backpaw shortcut        add Desktop and Start menu shortcuts with the Backpaw icon (Windows)
   backpaw agents          list supported AI agents and whether the guard is on
   backpaw install [AGENT...]    turn the guard on (default: every agent found)
   backpaw uninstall [AGENT...]  turn it off (default: everywhere it is on)
@@ -928,6 +929,33 @@ def _copy_self():
         if ICON.exists():
             (DATA / "assets").mkdir(exist_ok=True)
             shutil.copy2(ICON, DATA / "assets" / ICON.name)
+            if ICON.with_suffix(".ico").exists():
+                shutil.copy2(ICON.with_suffix(".ico"), DATA / "assets" / "logo.ico")
+
+
+def make_shortcuts():
+    """Desktop and Start menu shortcuts that open the window with the Backpaw icon (Windows)."""
+    if not IS_WIN:
+        raise OSError("shortcuts are only made on Windows; on macOS run: python3 backpaw.py")
+    _copy_self()
+    pyw = Path(_python()).with_name("pythonw.exe")
+    ps = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    # values go in through the environment, never spliced into the PowerShell text
+    script = ("$p = Join-Path ([Environment]::GetFolderPath($env:BP_WHERE)) 'Backpaw.lnk';"
+              "$s = (New-Object -ComObject WScript.Shell).CreateShortcut($p);"
+              "$s.TargetPath = $env:BP_TARGET; $s.Arguments = $env:BP_ARGS; $s.IconLocation = $env:BP_ICON;"
+              "$s.WorkingDirectory = $env:BP_DIR; $s.Description = 'Backpaw: restore what AI agents deleted';"
+              "$s.Save(); $p")
+    made = []
+    for where in ("Desktop", "Programs"):
+        env = {**os.environ, "BP_WHERE": where, "BP_TARGET": str(pyw if pyw.exists() else Path(_python())),
+               "BP_ARGS": f'"{_installed_script()}"', "BP_ICON": str(DATA / "assets" / "logo.ico"), "BP_DIR": str(DATA)}
+        r = subprocess.run([str(ps), "-NoProfile", "-NonInteractive", "-Command", script], env=env,
+                           capture_output=True, text=True, timeout=60)
+        if r.returncode:
+            raise OSError(r.stderr.strip() or "could not create shortcut")
+        made.append(r.stdout.strip())
+    return made
 
 
 def _hook_cmd(agent, powershell=False):
@@ -1572,6 +1600,13 @@ def main(argv):
         try:
             print("snapshot:", snapshot(args[0] if args else os.getcwd()))
         except OSError as ex:
+            print("error:", ex, file=sys.stderr)
+            return 1
+    elif cmd == "shortcut":
+        try:
+            for p in make_shortcuts():
+                print("shortcut:", p)
+        except (OSError, subprocess.TimeoutExpired) as ex:
             print("error:", ex, file=sys.stderr)
             return 1
     elif cmd == "snapshots":

@@ -104,6 +104,9 @@ python backpaw.py uninstall          # remove it everywhere
 Restart the agent after installing. You can also turn the guard on or off per agent from the window
 (**Agents…**).
 
+On Windows, `python backpaw.py shortcut` adds **Backpaw** to your Desktop and Start menu with its own icon,
+so the window opens with a double-click.
+
 > **"Python was not found; run without arguments to install from the Microsoft Store"?** Python is
 > installed, but the terminal (or the app it runs in) was opened before the install and still has the old
 > PATH. Open a new terminal, or restart the app hosting it. To fix the current PowerShell window without
@@ -122,6 +125,7 @@ Restart the agent after installing. You can also turn the guard on or off per ag
 ```bash
 python backpaw.py              # restore window (on Windows, pythonw backpaw.py opens it without a console)
 python backpaw.py agents       # which agents are found / guarded
+python backpaw.py shortcut     # Desktop + Start menu shortcuts with the Backpaw icon (Windows)
 python backpaw.py trash FILE   # recycle a file (what agents are told to run)
 python backpaw.py list         # log of trashed/moved items
 python backpaw.py scan         # deletes/moves from past Claude Code sessions
