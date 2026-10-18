@@ -31,7 +31,7 @@ import time
 import uuid
 from pathlib import Path
 
-__version__ = "0.9.0"
+__version__ = "0.9.1"
 REPO_URL = "https://github.com/Ls1more/backpaw"
 ICON = Path(__file__).resolve().parent / "assets" / "logo.png"
 
@@ -50,13 +50,19 @@ MOVE_VERBS = {"mv", "move", "move-item", "mi"}
 COPY_VERBS = {"cp", "copy", "copy-item", "cpi", "xcopy"}
 # Prefixes that run the next word as the real command.
 WRAPPERS = {"sudo", "doas", "env", "nohup", "time", "nice", "command", "exec", "xargs", "call", "start",
-            "cmd", "/c", "&"}
+            "cmd", "/c", "&", "timeout", "stdbuf", "ionice", "chronic", "caffeinate", "busybox", "flock"}
 SHELLS = {"bash", "sh", "zsh", "dash", "fish", "powershell", "pwsh"}
+# Tools that run another command they're given (find -exec rm ...): any delete verb in their arguments counts.
+LAUNCHERS = {"find", "fd", "fdfind", "parallel", "watch"}
+# Interpreters whose one-liners (-c/-e) can delete files; the code text is checked for delete verbs.
+INTERPRETERS = {"python", "python3", "py", "node", "perl", "ruby", "php", "deno", "bun"}
+# git global options that may sit between "git" and the subcommand (git -C dir clean ...)
+GIT = r"\bgit(?:\s+(?:-[Cc]\s+\S+|--[\w-]+(?:=\S+)?|-[A-Za-z]))*\s+"
 # Destructive commands we can't attribute to specific paths: always blocked.
 ALWAYS_BLOCK = re.compile(
     r"\s-delete\b|rmtree|os\.(?:remove|unlink)|\.(?:unlink|rmdir)\(|unlinkSync|fs\.rm|rimraf|::Delete\("
-    r"|File\.delete|FileUtils\.rm|\bunlink\b|Clear-RecycleBin|Clear-Content"
-    r"|\bgit\s+(?:clean\b|reset\s+--hard|checkout\s+(?:\S+\s+)?--\s|restore\b(?!.*--staged)|stash\s+(?:drop|clear))"
+    r"|File\.delete|FileUtils\.rm|\bunlink\b|Clear-RecycleBin|Clear-Content|"
+    + GIT + r"(?:clean\b|reset\s+--hard|checkout\s+(?:\S+\s+)?--\s|restore\b(?!.*--staged)|stash\s+(?:drop|clear))"
     r"|\brsync\b.*\s--delete|\brobocopy\b.*\s/(?:mir|purge)\b"
     # PowerShell -EncodedCommand (and its abbreviations) hides the real command
     r"|\b(?:powershell|pwsh)(?:\.exe)?\b.*?\s[-/]e(?:c|n\w*)?\b",
@@ -111,10 +117,36 @@ def segments(command):
         yield seg, _unwrap(toks)
 
 
+def _local_after_remote(command):
+    """For `ssh host ...; more`, the part after the first top-level separator runs locally.
+    Returns that local part ('' if none). A heredoc (<<) is treated as entirely remote."""
+    if "<<" in command:
+        return ""
+    lex = shlex.shlex(command.replace("\n", " ; "), posix=True, punctuation_chars=True)
+    lex.whitespace_split = True
+    try:
+        toks = list(lex)
+    except ValueError:
+        return command  # unbalanced quotes: don't trust the ssh exemption
+    cut = next((i for i, t in enumerate(toks) if t and set(t) <= set(";&|")), None)
+    return shlex.join(toks[cut + 1:]) if cut is not None else ""
+
+
+def _arg_path(arg, cwd):
+    """Absolute path a delete argument refers to, or None when the shell would expand it into something
+    Backpaw can't see ($VAR, %VAR%, `cmd`). ~ is expanded the way the shell does."""
+    if any(c in arg for c in "$%`"):
+        return None
+    if arg.startswith("~"):
+        arg = os.path.expanduser(arg)
+    return os.path.abspath(os.path.join(cwd, arg))
+
+
 def delete_targets(command, cwd):
     """[] = no delete; list = absolute paths being deleted; None = a delete we can't pin down."""
     if REMOTE_RE.match(command):
-        return []
+        local = _local_after_remote(command)
+        return delete_targets(local, cwd) if local else []
     if ALWAYS_BLOCK.search(command):
         return None
     targets = []
@@ -123,19 +155,26 @@ def delete_targets(command, cwd):
             if LOOSE_DELETE.search(seg):
                 return None
             continue
-        if toks and _verb(toks[0]) in SHELLS:
+        verb = _verb(toks[0]) if toks else ""
+        if verb in SHELLS:
             inner = _shell_payload(toks)
             found = delete_targets(inner, cwd) if inner else []
             if found is None:
                 return None
             targets += found
-        elif toks and _verb(toks[0]) in DELETE_VERBS:
+        elif verb in LAUNCHERS and any(_verb(t) in DELETE_VERBS for t in toks[1:]):
+            return None
+        elif verb in INTERPRETERS and any(t in ("-c", "-e", "-r", "-E", "-p", "--eval") for t in toks[1:]):
+            if LOOSE_DELETE.search(" ".join(toks[1:])):
+                return None
+        elif verb in DELETE_VERBS:
             # On Windows a leading "/" is a cmd switch (del /q) or a Git Bash path we can't map: skip it,
             # which leaves no target and so blocks.
             args = [t for t in toks[1:] if not t.startswith("-") and not (IS_WIN and t.startswith("/"))]
-            if not args or any("$" in a for a in args):
+            paths = [_arg_path(a, cwd) for a in args]
+            if not paths or None in paths:
                 return None
-            targets += [os.path.abspath(os.path.join(cwd, a)) for a in args]
+            targets += paths
     return targets
 
 
@@ -186,7 +225,7 @@ def parse_moves(command, cwd, verbs=MOVE_VERBS):
 # ---------- log ----------
 
 def log(entry):
-    DATA.mkdir(exist_ok=True)
+    DATA.mkdir(parents=True, exist_ok=True)
     entry = {"id": uuid.uuid4().hex[:12], "time": time.strftime("%Y-%m-%d %H:%M:%S"), **entry}
     with LOG.open("a", encoding="utf-8") as f:
         f.write(json.dumps(entry) + "\n")
@@ -196,7 +235,15 @@ def log(entry):
 def read_log():
     if not LOG.exists():
         return []
-    entries = [json.loads(l) for l in LOG.read_text(encoding="utf-8").splitlines() if l.strip()]
+    required = {"trash": ("id", "path", "trashed"), "move": ("id", "src", "dst"), "restored": ("of",)}
+    entries = []
+    for line in LOG.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue  # a damaged line never takes the whole window down
+        if isinstance(e, dict) and all(isinstance(e.get(k), str) for k in required.get(e.get("op"), ("?",))):
+            entries.append(e)
     restored = {e["of"] for e in entries if e["op"] == "restored"}
     out = []
     for e in entries:
@@ -256,6 +303,18 @@ RISKY_DEST = re.compile(
     r"|[\\/]\.(?:bashrc|bash_profile|zshrc|zprofile|zshenv|profile)$|[\\/]PowerShell[\\/].*profile",
     re.I,
 )
+
+
+def _through_link(path):
+    """True if path or any existing folder above it is a symlink or junction. A folder swapped for a link
+    after the original delete/move would otherwise redirect a restore somewhere else."""
+    p = Path(os.path.abspath(path))
+    for part in [p, *p.parents]:
+        if not os.path.lexists(part) or (not IS_WIN and part.parent == Path("/")):
+            continue  # macOS ships /var, /tmp, /etc as links at the root: those are the system's, not a swap
+        if os.path.islink(part) or (IS_WIN and getattr(os.lstat(part), "st_reparse_tag", 0) == 0xA0000003):
+            return True
+    return False
 
 
 def risky_destination(entry):
@@ -368,6 +427,8 @@ def restore(entry):
     if not os.path.lexists(held):
         raise FileNotFoundError(f"{held} is missing (Recycle Bin emptied, or the move never happened)")
     _verify(entry)
+    if _through_link(os.path.dirname(home)):
+        raise PermissionError(f"the way back to {home} now goes through a link; refusing to restore there")
     if os.path.lexists(home):
         raise FileExistsError(f"{home} already exists; not overwriting")
     os.makedirs(os.path.dirname(home), exist_ok=True)
@@ -422,13 +483,30 @@ def stale_days():
     return d if isinstance(d, int) and 1 <= d <= 365 else 3
 
 
-# Backpaw runs git outside any agent sandbox, inside repos an agent can edit. A repo's own config can make
-# git run programs (core.fsmonitor on status/ls-files), so that is always switched off here.
-SAFE_GIT = ["-c", "core.fsmonitor=false"]
+# Backpaw runs git outside any agent sandbox, inside repos an agent can edit. A repo's config and hooks can
+# make git start other programs, so for every call: no fsmonitor, no hooks (pointed at a folder that never
+# exists), no commit/tag signing and no signature display (both run a configured gpg program).
+SAFE_GIT = ["-c", "core.fsmonitor=false", "-c", f"core.hooksPath={DATA / 'no-hooks-here'}",
+            "-c", "commit.gpgSign=false", "-c", "tag.gpgSign=false", "-c", "log.showSignature=false"]
+
+
+def _git_exe():
+    """Absolute path to git from PATH. On Windows, starting a bare "git" would look in the current folder
+    first, which is the agent's project, so only absolute PATH entries are searched."""
+    if IS_WIN:
+        for d in os.environ.get("PATH", "").split(os.pathsep):
+            exe = os.path.join(d, "git.exe")
+            if os.path.isabs(d) and os.path.isfile(exe):
+                return exe
+        return None
+    return shutil.which("git")
 
 
 def _git_run(folder, *args, timeout=10, **kw):
-    return subprocess.run(["git", *SAFE_GIT, "-C", str(folder), *args], capture_output=True, timeout=timeout, **kw)
+    exe = _git_exe()
+    if not exe:
+        raise OSError("git not found")
+    return subprocess.run([exe, *SAFE_GIT, "-C", str(folder), *args], capture_output=True, timeout=timeout, **kw)
 
 
 def _git(folder, *args):
@@ -501,6 +579,8 @@ def backup_warnings(folder):
 
 SNAPSHOT_EVERY = 30 * 60  # seconds between automatic snapshots of one folder
 SNAPSHOT_KEEP = 5          # newest bundles kept per repo
+SNAPSHOT_MAX_BYTES = 100 * 1024 * 1024  # skip bigger files (GitHub's own per-file limit)
+SNAPSHOT_GAP = 60          # seconds between any two background snapshots, whatever the folder
 SNAPSHOT_REF = "refs/backpaw/snapshot"
 
 
@@ -531,6 +611,18 @@ def snapshot(folder, dest=None):
     top = _git(folder, "rev-parse", "--show-toplevel")
     if not top:
         raise OSError(f"{folder} is not inside a git repository")
+    # core.worktree can point a repo's working tree at any folder; only snapshot a folder that holds the .git
+    if not os.path.lexists(os.path.join(top, ".git")):
+        raise OSError(f"{top} doesn't contain the repository's .git; not snapshotting it")
+    real_top = os.path.realpath(top)
+
+    def inside(p):  # really lives in the repo: not reached through a link or junction to elsewhere
+        full = os.path.join(top, os.fsdecode(p))
+        try:
+            return (os.path.isfile(full) and not os.path.islink(full) and os.path.getsize(full) <= SNAPSHOT_MAX_BYTES
+                    and os.path.commonpath([os.path.realpath(full), real_top]) == real_top)
+        except ValueError:  # different drive
+            return False
 
     def run(*args, env=None, data=None):
         r = _git_run(top, *args, timeout=300, input=data, env=env)
@@ -551,9 +643,9 @@ def snapshot(folder, dest=None):
     for path in run("ls-files", "-z", "--others", "--exclude-standard").split(b"\0"):
         if path:
             entries.setdefault(path, b"100644")
-    # current contents from disk; deleted files drop out, symlinks and odd names are skipped
-    files = [p for p in entries if b"\n" not in p and os.path.isfile(os.path.join(top, os.fsdecode(p)))
-             and not os.path.islink(os.path.join(top, os.fsdecode(p)))]
+    # current contents from disk; deleted files drop out; links, files outside the repo, files over the size
+    # limit and odd names are skipped
+    files = [p for p in entries if b"\n" not in p and inside(p)]
     shas = run("hash-object", "-w", "--no-filters", "--stdin-paths", data=b"\n".join(files)).split() if files else []
     lines = [m + b" " + s + b"\t" + p for p, (m, s) in keep.items()]
     lines += [entries[p] + b" " + s + b"\t" + p for p, s in zip(files, shas)]
@@ -567,8 +659,8 @@ def snapshot(folder, dest=None):
         tree = run("write-tree", env=env).strip()
         head = _git(top, "rev-parse", "--verify", "-q", "HEAD")
         parent = ["-p", head] if head else []
-        commit = run("commit-tree", tree.decode(), *parent, "-m", f"Backpaw snapshot {time.strftime('%Y-%m-%d %H:%M:%S')}",
-                     env=env).strip().decode()
+        commit = run("commit-tree", "--no-gpg-sign", tree.decode(), *parent, "-m",
+                     f"Backpaw snapshot {time.strftime('%Y-%m-%d %H:%M:%S')}", env=env).strip().decode()
     run("update-ref", SNAPSHOT_REF, commit)
 
     slot = dest / f"{Path(top).name}-{hashlib.sha1(os.path.normcase(top).encode()).hexdigest()[:8]}"
@@ -592,11 +684,12 @@ def maybe_snapshot(cwd):
         stamps = json.loads(stamps_file.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         stamps = {}
-    key = os.path.normcase(os.path.abspath(cwd))
-    if time.time() - stamps.get(key, 0) < SNAPSHOT_EVERY:
-        return
-    stamps[key] = time.time()
-    DATA.mkdir(exist_ok=True)
+    key, now = os.path.normcase(os.path.abspath(cwd)), time.time()
+    if now - stamps.get(key, 0) < SNAPSHOT_EVERY or now - stamps.get("_any", 0) < SNAPSHOT_GAP:
+        return  # per-folder interval, plus a global gap so hopping between folders can't pile up snapshots
+    stamps = {k: t for k, t in stamps.items() if now - t < SNAPSHOT_EVERY}  # forget stale folders
+    stamps[key] = stamps["_any"] = now
+    DATA.mkdir(parents=True, exist_ok=True)
     stamps_file.write_text(json.dumps(stamps), encoding="utf-8")
     detach = {"creationflags": 0x00000008 | 0x08000000} if IS_WIN else {"start_new_session": True}
     subprocess.Popen([_python(), str(Path(__file__).resolve()), "snapshot", key], stdin=subprocess.DEVNULL,
@@ -673,7 +766,7 @@ API_DESTRUCTIVE = [
                                r"|\bdocker\s+(?:system\s+prune|volume\s+(?:rm|prune)|compose\s+down\b.*\s-v\b)"),
     ("delete on GitHub", r"\bgh\s+(?:repo|release|secret|variable|gist|run|cache)\s+delete\b"
                          r"|\bgh\s+api\b.*(?:-X|--method)\s*['\"]?DELETE\b"),
-    ("rewrite or delete remote git history", r"\bgit\s+push\b.*(?:\s--force(?:-with-lease)?\b|\s-f\b|\s--delete\b"
+    ("rewrite or delete remote git history", GIT + r"push\b.*(?:\s--force(?:-with-lease)?\b|\s-f\b|\s--delete\b"
                                              r"|\s--mirror\b|\s\+\S|\s:\S)"),
     ("send an HTTP DELETE", r"\bcurl\b.*(?:-X|--request)\s*['\"]?DELETE\b|\b(?:Invoke-RestMethod|Invoke-WebRequest|irm|iwr)\b.*-Method\s+['\"]?Delete\b"
                             r"|\bhttp(?:ie)?\s+DELETE\b"),
@@ -759,8 +852,36 @@ def _snapshot_quietly(cwd):
         pass
 
 
+# Backpaw's own files and the agents' hook settings: changing them from the shell needs the user's OK,
+# so an agent can't quietly switch the guard off. (Backpaw's own read-only/trash commands are fine.)
+PROTECTED = re.compile(
+    r"[\\/]\.backpaw\b|[\\/]\.claude[\\/]settings|[\\/]\.codex[\\/](?:hooks|config)|[\\/]\.gemini[\\/]settings"
+    r"|[\\/]\.cursor[\\/]hooks|[\\/]\.copilot[\\/]hooks|[\\/]windsurf[\\/]hooks|[\\/]\.qwen[\\/]settings"
+    r"|[\\/]\.kimi-code[\\/]config|[\\/]opencode[\\/]plugins", re.I)
+SAFE_SELF = {"trash", "list", "agents", "check", "snapshot", "snapshots", "scan", "--version", "version"}
+
+
+def _backpaw_call_only(command):
+    """True if every part of command is just Backpaw running one of its safe subcommands."""
+    parts = [toks for _, toks in segments(command)]
+    return bool(parts) and all(
+        toks and any(_verb(t) == "backpaw.py" and i + 1 < len(toks) and toks[i + 1] in SAFE_SELF
+                     for i, t in enumerate(toks)) for toks in parts)
+
+
 def hook(agent="claude"):
-    data = json.load(sys.stdin)
+    raw = sys.stdin.buffer.read() if hasattr(sys.stdin, "buffer") else sys.stdin.read().encode("utf-8")
+    text = raw.decode("utf-8", errors="replace")  # agents send UTF-8; never the console code page
+    try:
+        return _hook(agent, json.loads(text))
+    except Exception:  # never fail open on a delete just because the payload surprised us
+        if ALWAYS_BLOCK.search(text) or LOOSE_DELETE.search(text):
+            return _answer(agent, "block", "Backpaw couldn't check this command safely, so it was blocked. "
+                                           "Ask the user to run it if it's needed.")
+        return 0
+
+
+def _hook(agent, data):
     if data.get("hook_event_name") == "SessionStart":
         _snapshot_quietly(data.get("cwd"))
         w = backup_warnings(data.get("cwd") or os.getcwd())
@@ -779,6 +900,8 @@ def hook(agent="claude"):
     reason = guard(command, cwd or os.getcwd())
     if reason:
         return _answer(agent, "block", reason)
+    if PROTECTED.search(command) and not _backpaw_call_only(command):
+        return _answer(agent, "ask", "change Backpaw's own files or an agent's hook settings")
     what = destructive_api(command) if ask_first_enabled() else None
     return _answer(agent, "ask", what) if what else 0
 
@@ -800,7 +923,7 @@ def _installed_script():
 def _copy_self():
     target = _installed_script()
     if Path(__file__).resolve() != target.resolve():
-        DATA.mkdir(exist_ok=True)
+        DATA.mkdir(parents=True, exist_ok=True)
         shutil.copy2(__file__, target)
         if ICON.exists():
             (DATA / "assets").mkdir(exist_ok=True)
@@ -810,8 +933,9 @@ def _copy_self():
 def _hook_cmd(agent, powershell=False):
     """Hook command line, quoted only where needed so one string works in bash and cmd."""
     parts = [_python(), _installed_script().as_posix(), "hook", agent]
-    line = " ".join(f'"{p}"' if " " in p else p for p in parts)
-    return "& " + line if powershell and " " in parts[0] else line
+    needs_quotes = lambda p: re.search(r"[^\w./:\\-]", p)  # spaces, &, %, ( ... in a user's path  # noqa: E731
+    line = " ".join(f'"{p}"' if needs_quotes(p) else p for p in parts)
+    return "& " + line if powershell and needs_quotes(parts[0]) else line
 
 
 def _agents():
@@ -852,7 +976,7 @@ TOML_BLOCK = """# >>> backpaw
 [[hooks]]
 event = "PreToolUse"
 matcher = "Bash"
-command = '{cmd}'
+command = {cmd}
 timeout = 30
 # <<< backpaw
 """
@@ -925,7 +1049,8 @@ def install(agent):
         return f"{a['name']}: guard plugin written to {a['config']}. Restart it to activate."
     if a.get("kind") == "toml":
         text = TOML_BLOCK_RE.sub("\n", _read_text(a["config"])).rstrip("\n")
-        _write_text(a["config"], (text + "\n\n" if text else "") + TOML_BLOCK.format(cmd=_hook_cmd(agent)))
+        # a JSON string is a valid TOML basic string, so quotes and backslashes in paths stay escaped
+        _write_text(a["config"], (text + "\n\n" if text else "") + TOML_BLOCK.format(cmd=json.dumps(_hook_cmd(agent))))
         return f"{a['name']}: guard installed in {a['config']}. Restart it to activate."
     cfg = _read_json(a["config"])
     for k, v in a["base"].items():
@@ -1018,7 +1143,7 @@ def _load_prefs():
 
 def _save_prefs(**prefs):
     try:
-        DATA.mkdir(exist_ok=True)
+        DATA.mkdir(parents=True, exist_ok=True)
         (DATA / "settings.json").write_text(json.dumps({**_load_prefs(), **prefs}), encoding="utf-8")
     except OSError:
         pass
@@ -1209,7 +1334,8 @@ def gui():
             act.pack(anchor="w", pady=(6, 0))
             ttk.Button(act, text="System Protection (shadow copies)…",
                        # needs admin: open via the shell so Windows shows its UAC prompt
-                       command=lambda: open_path("SystemPropertiesProtection.exe")).pack(side="left")
+                       command=lambda: open_path(os.path.join(os.environ.get("SystemRoot", r"C:\Windows"),
+                                                              "System32", "SystemPropertiesProtection.exe"))).pack(side="left")
             ttk.Button(act, text="OneDrive backup settings…",
                        command=lambda: open_path("ms-settings:backup")).pack(side="left", padx=6)
 

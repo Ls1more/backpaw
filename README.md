@@ -147,10 +147,18 @@ sandbox, so Backpaw is built not to hand an agent anything it couldn't already d
 - **No injection paths**: no shell is ever built from command text; the macOS Trash call passes the path as
   an argument. No third-party dependencies. Agent configs are written atomically and the pre-Backpaw
   original is kept as `*.backpaw-bak`.
-- **Git runs safely inside agent-editable repos.** A repo's own config can make git run programs
-  (`core.fsmonitor`, filter drivers during `git status`). Backpaw switches `fsmonitor` off and blanks every
-  defined filter for its status check, and snapshots copy file contents with `--no-filters` into a throwaway
-  index, so nothing the repo defines ever runs outside the agent's sandbox.
+- **Git runs safely inside agent-editable repos.** A repo's own config and hooks can make git start other
+  programs. Backpaw finds git by absolute path (never the project folder), and every git call switches off
+  `fsmonitor`, hooks, commit/tag signing and signature display; the status check also blanks every defined
+  filter. Snapshots copy file contents with `--no-filters` into a throwaway index and skip anything that
+  doesn't really live inside the repo (links, junctions, a redirected `core.worktree`) or is over 100 MB.
+- **Shell expansion is taken into account**: `~` is expanded to the real home folder, and delete targets
+  built from `$VAR`, `%VAR%` or `` `…` `` are blocked, so `rm -rf ~` is never mistaken for a temp-folder path.
+- **Restores don't follow swapped-in links**: if a folder on the way back has become a symlink or junction,
+  the restore is refused.
+- **Agents can't quietly switch it off**: besides `uninstall` being blocked, any shell command that touches
+  `~/.backpaw` or an agent's hook settings needs your confirmation.
+- **Fails closed on deletes**: if the hook hits an unexpected error, delete-looking commands are blocked.
 - The log stores paths only, never command text.
 
 Known gaps (by design or not yet covered):
@@ -158,7 +166,8 @@ Known gaps (by design or not yet covered):
 - A script file run by the agent (`python cleanup.py`, `bash nuke.sh`) can delete anything; Backpaw only
   sees the command line.
 - Shell redirection (`> file`) can truncate a file.
-- If Python is missing or the hook crashes, most agents let the command through (Copilot CLI blocks it).
+- If Python itself is missing, most agents let the command through (Copilot CLI blocks it). Errors inside
+  Backpaw block delete-looking commands.
 - An agent with unrestricted file access could edit its own hook config with its file-edit tool; only the
   shell route is blocked. Sandboxed agents can't reach those files.
 - False positives: a command whose *text* contains delete-like code (for example a heredoc with
@@ -172,7 +181,8 @@ Known gaps (by design or not yet covered):
   Keep a real backup (OneDrive / File History / Time Machine).
 - Once the Recycle Bin is emptied, a trashed item shows as `missing`.
 - On a drive with no Recycle Bin (e.g. network shares), Backpaw refuses to delete rather than delete permanently.
-- A command starting with `ssh` is treated as remote in full, so `ssh host x; rm local` is not caught.
+- Only the `ssh` part of a command is treated as remote; anything after `;`, `&&` or `|` is checked locally.
+  A heredoc piped to ssh (`ssh host sh <<EOF`) is treated as entirely remote.
 - Agent support beyond Claude Code is built from each agent's published hook docs and tested with simulated
   payloads; please report anything that misbehaves. Gemini CLI hooks may need enabling in its settings.
 - Not yet supported: Cline and Kilo Code (no shell-command hooks), Aider (no hook system), Crush and Goose
@@ -190,6 +200,10 @@ Backpaw makes **no network connections** and collects nothing. Everything stays 
 (`~/.backpaw/log.jsonl`, file paths only), your settings (`~/.backpaw/settings.json`), and the hook entries
 it adds to your agents' config files.
 The only link it opens is this repository, when you click it in the About box.
+
+## Changelog
+
+Every change, version by version, is in [CHANGELOG.md](CHANGELOG.md).
 
 ## Reporting security issues
 

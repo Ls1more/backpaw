@@ -40,6 +40,44 @@ for cmd in ["rm -rf scratch", "Remove-Item x.txt", "ssh root@nas 'rm -f /tmp/x'"
             "echo firmware", "npm run format", "python backpaw.py trash a", "git status"]:
     assert run_hook(cmd, tmp) == 0, cmd
 
+# v0.9.1 regression checks ------------------------------------------------------------------------------
+# 1. home and variables expand in the shell, not in temp: blocked even when the agent's folder is in temp
+for cmd in ["rm -rf ~", "rm -rf ~/Documents", "del %USERPROFILE%\\Documents", "rm -rf `pwd`/x", "rm -rf $HOME"]:
+    assert run_hook(cmd, tmp) == 2, cmd
+assert run_hook("rm -rf ./scratch", tmp) == 0  # real temp paths still fine
+# 6. commands that launch a delete through another tool
+for cmd in ["timeout 5 rm -rf src", "find . -name '*.log' -exec rm {} +", "fd -e tmp -x rm", "git -C repo clean -fdx",
+            "git -c core.x=1 reset --hard", "git --no-pager stash drop", "python -c \"import os; os.system('rm -rf src')\"",
+            "node -e \"require('child_process').execSync('rm -rf src')\"", "busybox rm -rf src"]:
+    assert run_hook(cmd, home) == 2, cmd
+for cmd in ["find . -name '*.log'", "timeout 5 npm test", "python -c \"print(1)\"", "git -C repo status"]:
+    assert run_hook(cmd, home) == 0, cmd
+# 9. only the ssh part is remote: local commands after it are checked
+assert run_hook("ssh nas 'rm -rf /tmp/cache'", home) == 0
+for cmd in ["ssh nas uptime; rm -rf src", "ssh nas uptime && git clean -fdx", "ssh nas 'ls'\nrm -rf src"]:
+    assert run_hook(cmd, home) == 2, cmd
+# 2. the hook reads UTF-8 whatever the console code page, and never fails open on a delete
+script = str(Path(backpaw.__file__).resolve())
+def hook_bytes(payload):
+    return subprocess.run([sys.executable, script, "hook", "claude"], input=payload, capture_output=True).returncode
+assert hook_bytes(json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash", "cwd": home,
+                              "tool_input": {"command": "rm -rf Documents # café Ámbar ✓"}},
+                             ensure_ascii=False).encode("utf-8")) == 2
+assert hook_bytes(b'{"tool_input": {"command": "rm -rf src"') == 2   # unreadable payload with a delete: blocked
+assert hook_bytes(b'{"tool_input": {"command": "ls"') == 0           # unreadable payload, harmless: allowed
+# 3/4. git is found by absolute path and always runs with hooks, signing and fsmonitor switched off
+assert backpaw._git_exe() and os.path.isabs(backpaw._git_exe())
+for opt in ("core.fsmonitor=false", "commit.gpgSign=false", "log.showSignature=false"):
+    assert opt in backpaw.SAFE_GIT, opt
+assert any(o.startswith("core.hooksPath=") for o in backpaw.SAFE_GIT)
+# 7. changing Backpaw's files or agent hook settings from the shell needs the user's OK
+for cmd in ["mv ~/.backpaw ~/.backpaw-old", "cat ~/.claude/settings.json", "notepad ~/.cursor/hooks.json"]:
+    code, out, _ = run_agent("claude", {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                        "tool_input": {"command": cmd}, "cwd": home})
+    assert code == 0 and json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "ask", (cmd, out)
+assert run_hook(f'"{sys.executable}" "{home}/.backpaw/backpaw.py" trash x.txt', tmp) == 0  # Backpaw's own trash
+assert run_hook(f'python "{home}/.backpaw/backpaw.py" agents', home) == 0
+
 # every agent's payload shape is understood, and answered in that agent's format
 blocked = {
     "claude": {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "rm -rf src"}, "cwd": home},
@@ -189,6 +227,31 @@ backpaw.restore(entry)
 assert (work / "b.txt").read_text() == "b" and not (work / "c.txt").exists()
 assert [e for e in backpaw.read_log() if e["id"] == entry["id"]][0]["status"] == "restored"
 
+# 11. damaged or incomplete log lines are skipped instead of breaking the restore window
+with backpaw.LOG.open("a", encoding="utf-8") as f:
+    f.write("not json\n{\"op\": \"trash\"}\n[1, 2]\n{\"op\": \"move\", \"id\": 5}\n")
+assert all(e["op"] in ("trash", "move") for e in backpaw.read_log())
+
+# 5. restore refuses when a folder on the way back has been replaced by a link
+(work / "orig").mkdir()
+(work / "orig" / "f.txt").write_text("f")
+(work / "elsewhere").mkdir()
+assert run_hook("mv orig/f.txt f-moved.txt", work) == 0
+os.rename(work / "orig" / "f.txt", work / "f-moved.txt")
+link_entry = [e for e in backpaw.read_log() if e.get("dst") == str(work / "f-moved.txt")][-1]
+os.rename(work / "orig", work / "orig-old")
+if backpaw.IS_WIN:
+    subprocess.run(["cmd", "/c", "mklink", "/J", str(work / "orig"), str(work / "elsewhere")], check=True, capture_output=True)
+else:
+    os.symlink(work / "elsewhere", work / "orig")
+try:
+    backpaw.restore(link_entry)
+    raise AssertionError("restored through a link")
+except PermissionError:
+    pass
+assert not (work / "elsewhere" / "f.txt").exists()
+os.rmdir(work / "orig") if backpaw.IS_WIN else os.unlink(work / "orig")
+
 # restore hijack: a pre-logged move "from" Startup, then a payload dropped in the workspace
 startup = os.path.expandvars(r"%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\evil.bat")
 before = len(backpaw.read_log())
@@ -246,6 +309,10 @@ backpaw.SETTINGS = backpaw.CLAUDE / "settings.json"
 backpaw.SETTINGS.parent.mkdir(parents=True)
 backpaw.SETTINGS.write_text(json.dumps({"hooks": {"PreToolUse": [{"matcher": "Edit", "hooks": [{"type": "command", "command": "other"}]}]}}))
 assert backpaw.detected_agents() == ["claude"]
+# 10. a user path with ' and & must still produce valid agent configs (TOML parses, command line quoted)
+real_data = backpaw.DATA
+backpaw.DATA = tmp / "O'Neil & Co" / ".backpaw"
+assert backpaw._hook_cmd("claude").count('"') >= 2, backpaw._hook_cmd("claude")
 kimi_cfg = backpaw._agents()["kimi"]["config"]
 kimi_cfg.parent.mkdir(parents=True)
 kimi_cfg.write_text('default_model = "kimi-k2"\n\n[models.kimi-k2]\nprovider = "moonshot"\n')
@@ -275,6 +342,7 @@ assert json.loads(backpaw.SETTINGS.read_text())["hooks"]["PreToolUse"][0]["hooks
 # the backup is the config from before Backpaw ever touched it
 bak = json.loads(backpaw.SETTINGS.with_suffix(".json.backpaw-bak").read_text())
 assert "backpaw" not in json.dumps(bak) and bak["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == "other"
+backpaw.DATA = real_data
 
 # git reminders: local-only work gets flagged; a pushed repo counts as backed up (no OneDrive nag)
 import subprocess
@@ -352,6 +420,30 @@ for _ in range(backpaw.SNAPSHOT_KEEP + 2):
     backpaw.snapshot(repo, dest=snaps)
 assert len(list(b.parent.glob("*.bundle"))) == backpaw.SNAPSHOT_KEEP
 assert not list(b.parent.glob("*.partial"))
+# 8. snapshots copy only files that really live in the repo, within the size limit
+outside = tmp / "outside-secrets"
+outside.mkdir()
+(outside / "key.txt").write_text("outside the repo")
+if backpaw.IS_WIN:
+    subprocess.run(["cmd", "/c", "mklink", "/J", str(repo / "linked"), str(outside)], check=True, capture_output=True)
+else:
+    os.symlink(outside, repo / "linked")
+(repo / "big.bin").write_bytes(b"x" * 64)
+limit, backpaw.SNAPSHOT_MAX_BYTES = backpaw.SNAPSHOT_MAX_BYTES, 32
+b2 = backpaw.snapshot(repo, dest=tmp / "snaps2")
+backpaw.SNAPSHOT_MAX_BYTES = limit
+r2 = backpaw.restore_snapshot(b2, tmp / "restored2")
+assert not (r2 / "linked").exists() and not (r2 / "big.bin").exists(), list(r2.iterdir())
+assert (r2 / "new_module.py").exists()
+os.rmdir(repo / "linked") if backpaw.IS_WIN else os.unlink(repo / "linked")
+# a repo whose working tree is redirected elsewhere (core.worktree) is not snapshotted
+git(repo, "config", "core.worktree", str(outside))
+try:
+    backpaw.snapshot(repo, dest=tmp / "snaps3")
+    raise AssertionError("snapshotted a redirected working tree")
+except OSError:
+    pass
+git(repo, "config", "--unset", "core.worktree")
 # snapshots need a folder; off by default
 try:
     backpaw.snapshot(repo)
@@ -369,6 +461,10 @@ try:
     backpaw.maybe_snapshot(str(repo))
     backpaw.maybe_snapshot(str(repo))
     assert len(launched) == 1 and launched[0][-2:] == ["snapshot", os.path.normcase(os.path.abspath(repo))], launched
+    # 13. hopping to other folders right away doesn't start more snapshots (global gap)
+    for other in (tmp, work, outside):
+        backpaw.maybe_snapshot(str(other))
+    assert len(launched) == 1, launched
     backpaw._save_prefs(snapshot_dir="relative/path")
     assert backpaw.snapshot_dir() is None             # only absolute folders count
 finally:
