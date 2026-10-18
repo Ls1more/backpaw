@@ -49,6 +49,12 @@ What it does:
   existing file is blocked until that file is trashed.
 - **Restore window**: select rows, click **Restore**. Turn the guard on or off per agent. Follows the
   system light/dark theme.
+- **Code snapshots** (opt-in): unpushed commits, uncommitted edits and new files exist only on your machine
+  until you push, so anything that wipes the disk (an antivirus false positive, a bad script) takes them
+  with it. While an agent works in a git repo, Backpaw saves the repo's full state every 30 minutes as one
+  git bundle file into a folder you choose, ideally one that syncs off the machine (OneDrive, iCloud Drive,
+  Dropbox, a NAS, another drive). It respects `.gitignore`, keeps the newest 5 per repo, and never touches
+  your branches, staging area or files. `backpaw restore-snapshot` brings everything back in a new folder.
 - **Session history**: lists deletes and moves from past Claude Code sessions (`~/.claude/projects`).
 - **Backup check**: warns at session start (Claude Code, Codex, Gemini CLI) and in the window when work
   isn't backed up. For **git projects**, pushing is the backup: Backpaw reminds you if the repo has no remote,
@@ -97,6 +103,9 @@ python backpaw.py trash FILE   # recycle a file (what agents are told to run)
 python backpaw.py list         # log of trashed/moved items
 python backpaw.py scan         # deletes/moves from past Claude Code sessions
 python backpaw.py check [DIR]  # backup warning for a folder
+python backpaw.py snapshot [DIR]                 # snapshot a repo now (snapshot folder must be set)
+python backpaw.py snapshots                      # list saved snapshots
+python backpaw.py restore-snapshot BUNDLE DEST   # recreate the repo, uncommitted work included, in DEST
 python backpaw.py --version
 python test_backpaw.py         # smoke test
 ```
@@ -114,6 +123,7 @@ Open **Settings** in the window. Saved in `~/.backpaw/settings.json` and used by
 | Folders deleted directly | `node_modules`, `dist`, `build`, `.venv`, `venv`, `__pycache__`, `.next`, `target`, `.pytest_cache`, `.cache` | Build output and caches that skip the Recycle Bin. Deletes here are **permanent**. Plain folder names only; matched on the folder being deleted or one inside the project on the way to it, never a parent above it, and links are judged by where they really point. |
 
 | Ask before destructive cloud / API / database commands | On | Confirmation (or a block telling the agent to ask) for the commands and MCP tools listed above. |
+| Code snapshots folder | Off (empty) | Where repo snapshots go. **Use OneDrive** / **Use iCloud Drive** fills in a synced folder; any absolute path works. Off by default so work code never lands in a cloud account you didn't choose. |
 
 The "Not backed up" banner can be collapsed with **Hide**; that choice is remembered too.
 
@@ -137,6 +147,10 @@ sandbox, so Backpaw is built not to hand an agent anything it couldn't already d
 - **No injection paths**: no shell is ever built from command text; the macOS Trash call passes the path as
   an argument. No third-party dependencies. Agent configs are written atomically and the pre-Backpaw
   original is kept as `*.backpaw-bak`.
+- **Git runs safely inside agent-editable repos.** A repo's own config can make git run programs
+  (`core.fsmonitor`, filter drivers during `git status`). Backpaw switches `fsmonitor` off and blanks every
+  defined filter for its status check, and snapshots copy file contents with `--no-filters` into a throwaway
+  index, so nothing the repo defines ever runs outside the agent's sandbox.
 - The log stores paths only, never command text.
 
 Known gaps (by design or not yet covered):

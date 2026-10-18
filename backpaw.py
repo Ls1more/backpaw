@@ -5,6 +5,9 @@
   backpaw list            print the log
   backpaw scan            print deletes/moves found in past Claude sessions
   backpaw check [DIR]     warn if DIR (default: cwd) is not backed up
+  backpaw snapshot [DIR]  save a snapshot of DIR's git repo now (needs a snapshot folder in Settings)
+  backpaw snapshots       list saved snapshots
+  backpaw restore-snapshot BUNDLE DEST   recreate a repo, uncommitted work included, in a new folder
   backpaw agents          list supported AI agents and whether the guard is on
   backpaw install [AGENT...]    turn the guard on (default: every agent found)
   backpaw uninstall [AGENT...]  turn it off (default: everywhere it is on)
@@ -14,6 +17,7 @@
 Agents: claude, codex, gemini, cursor, copilot, windsurf, qwen, kimi, opencode
 """
 import glob
+import hashlib
 import json
 import os
 import re
@@ -27,7 +31,7 @@ import time
 import uuid
 from pathlib import Path
 
-__version__ = "0.8.1"
+__version__ = "0.9.0"
 REPO_URL = "https://github.com/Ls1more/backpaw"
 ICON = Path(__file__).resolve().parent / "assets" / "logo.png"
 
@@ -418,12 +422,31 @@ def stale_days():
     return d if isinstance(d, int) and 1 <= d <= 365 else 3
 
 
+# Backpaw runs git outside any agent sandbox, inside repos an agent can edit. A repo's own config can make
+# git run programs (core.fsmonitor on status/ls-files), so that is always switched off here.
+SAFE_GIT = ["-c", "core.fsmonitor=false"]
+
+
+def _git_run(folder, *args, timeout=10, **kw):
+    return subprocess.run(["git", *SAFE_GIT, "-C", str(folder), *args], capture_output=True, timeout=timeout, **kw)
+
+
 def _git(folder, *args):
     try:
-        r = subprocess.run(["git", "-C", folder, *args], capture_output=True, text=True, timeout=10)
+        r = _git_run(folder, *args, text=True)
     except (OSError, subprocess.TimeoutExpired):  # git not installed, or hung
         return None
     return r.stdout.strip() if r.returncode == 0 else None
+
+
+def safe_status(folder):
+    """`git status --porcelain` without running anything the repo's config defines. Status runs filter
+    drivers (filter.<name>.clean/process) on changed files, and names are arbitrary, so every defined filter
+    is blanked out for this call; git then skips it. Reading config runs nothing."""
+    names = _git(folder, "config", "--name-only", "--get-regexp", r"^filter\.") or ""
+    drivers = {k[len("filter."):k.rindex(".")] for k in names.splitlines() if k.count(".") >= 2}
+    blank = [a for d in sorted(drivers) for key in ("clean", "smudge", "process") for a in ("-c", f"filter.{d}.{key}=")]
+    return _git(folder, *blank, "status", "--porcelain", "--ignore-submodules")
 
 
 def git_warnings(folder):
@@ -442,7 +465,7 @@ def git_warnings(folder):
         days = int((now - min(times)) / 86400)
         if days >= limit:
             warnings.append(f"{name}: {len(times)} commit(s) not pushed; the oldest is {days} days old.")
-    if _git(folder, "status", "--porcelain"):
+    if safe_status(folder):
         last = _git(folder, "log", "-1", "--format=%ct")
         days = int((now - int(last)) / 86400) if last else None
         if days is None:
@@ -469,6 +492,137 @@ def backup_warnings(folder):
         if not folder.startswith(icloud) and "Name" not in tm:
             warnings.append(f"{folder} is not in iCloud Drive and Time Machine has no backup destination.")
     return warnings
+
+
+# ---------- code snapshots ----------
+# Unpushed commits, uncommitted edits and new files exist only on this machine until they're pushed; anything
+# that wipes the disk (an antivirus false positive, a bad script) takes them along. Snapshots copy all of it,
+# as one git bundle file per repo, into a folder the user picks (ideally one that syncs off the machine).
+
+SNAPSHOT_EVERY = 30 * 60  # seconds between automatic snapshots of one folder
+SNAPSHOT_KEEP = 5          # newest bundles kept per repo
+SNAPSHOT_REF = "refs/backpaw/snapshot"
+
+
+def snapshot_dir():
+    d = _load_prefs().get("snapshot_dir")
+    return Path(d) if isinstance(d, str) and os.path.isabs(d) else None
+
+
+def suggested_snapshot_dir():
+    """A folder the OS already syncs off the machine, if there is one."""
+    if IS_WIN:
+        root = next((os.environ[k] for k in ("OneDrive", "OneDriveConsumer", "OneDriveCommercial") if os.environ.get(k)), None)
+    elif IS_MAC:
+        icloud = HOME / "Library" / "Mobile Documents" / "com~apple~CloudDocs"
+        root = str(icloud) if icloud.is_dir() else None
+    else:
+        root = None
+    return Path(root) / "Backpaw snapshots" if root else None
+
+
+def snapshot(folder, dest=None):
+    """Bundle the repo containing folder -- full history plus uncommitted edits and untracked files, honoring
+    .gitignore -- into dest (default: the Settings folder). Never touches branches, the index or the working
+    tree, and never runs repo-defined filters, hooks or fsmonitor. Returns the bundle path."""
+    dest = Path(dest) if dest else snapshot_dir()
+    if not dest:
+        raise OSError("no snapshot folder set (Settings → Code snapshots)")
+    top = _git(folder, "rev-parse", "--show-toplevel")
+    if not top:
+        raise OSError(f"{folder} is not inside a git repository")
+
+    def run(*args, env=None, data=None):
+        r = _git_run(top, *args, timeout=300, input=data, env=env)
+        if r.returncode:
+            raise OSError(f"git {args[0]} failed: {r.stderr.decode(errors='replace').strip()}")
+        return r.stdout
+
+    # tracked entries (mode, path) from the index, then untracked files that .gitignore doesn't exclude
+    entries, keep = {}, {}
+    for rec in run("ls-files", "-z", "--stage").split(b"\0"):
+        if rec:
+            meta, path = rec.split(b"\t", 1)
+            mode, sha, _stage = meta.split()
+            if mode == b"160000":            # submodule: keep the pinned commit as is
+                keep[path] = (mode, sha)
+            else:
+                entries[path] = b"100755" if mode == b"100755" else b"100644"
+    for path in run("ls-files", "-z", "--others", "--exclude-standard").split(b"\0"):
+        if path:
+            entries.setdefault(path, b"100644")
+    # current contents from disk; deleted files drop out, symlinks and odd names are skipped
+    files = [p for p in entries if b"\n" not in p and os.path.isfile(os.path.join(top, os.fsdecode(p)))
+             and not os.path.islink(os.path.join(top, os.fsdecode(p)))]
+    shas = run("hash-object", "-w", "--no-filters", "--stdin-paths", data=b"\n".join(files)).split() if files else []
+    lines = [m + b" " + s + b"\t" + p for p, (m, s) in keep.items()]
+    lines += [entries[p] + b" " + s + b"\t" + p for p, s in zip(files, shas)]
+
+    with tempfile.TemporaryDirectory() as tmp:  # a throwaway index, so the real one is never touched
+        env = {**os.environ, "GIT_INDEX_FILE": os.path.join(tmp, "index"), "GIT_AUTHOR_NAME": "Backpaw",
+               "GIT_AUTHOR_EMAIL": "backpaw@localhost", "GIT_COMMITTER_NAME": "Backpaw",
+               "GIT_COMMITTER_EMAIL": "backpaw@localhost"}
+        if lines:
+            run("update-index", "-z", "--index-info", env=env, data=b"\0".join(lines) + b"\0")
+        tree = run("write-tree", env=env).strip()
+        head = _git(top, "rev-parse", "--verify", "-q", "HEAD")
+        parent = ["-p", head] if head else []
+        commit = run("commit-tree", tree.decode(), *parent, "-m", f"Backpaw snapshot {time.strftime('%Y-%m-%d %H:%M:%S')}",
+                     env=env).strip().decode()
+    run("update-ref", SNAPSHOT_REF, commit)
+
+    slot = dest / f"{Path(top).name}-{hashlib.sha1(os.path.normcase(top).encode()).hexdigest()[:8]}"
+    slot.mkdir(parents=True, exist_ok=True)
+    out = slot / f"{time.strftime('%Y%m%d-%H%M%S')}-{int(time.time() * 1000) % 1000:03d}.bundle"
+    part = out.with_suffix(".partial")
+    # ponytail: a full bundle every time; switch to incremental bundles if multi-GB repos become common
+    run("bundle", "create", str(part), "--all")
+    os.replace(part, out)  # a synced folder only ever sees complete bundles
+    for old in sorted(slot.glob("*.bundle"))[:-SNAPSHOT_KEEP]:
+        old.unlink()
+    return out
+
+
+def maybe_snapshot(cwd):
+    """From the hook: start a background snapshot of cwd's repo when one is due. Cheap when it isn't."""
+    if not cwd or not snapshot_dir():
+        return
+    stamps_file = DATA / "snapshot-times.json"
+    try:
+        stamps = json.loads(stamps_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        stamps = {}
+    key = os.path.normcase(os.path.abspath(cwd))
+    if time.time() - stamps.get(key, 0) < SNAPSHOT_EVERY:
+        return
+    stamps[key] = time.time()
+    DATA.mkdir(exist_ok=True)
+    stamps_file.write_text(json.dumps(stamps), encoding="utf-8")
+    detach = {"creationflags": 0x00000008 | 0x08000000} if IS_WIN else {"start_new_session": True}
+    subprocess.Popen([_python(), str(Path(__file__).resolve()), "snapshot", key], stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **detach)
+
+
+def restore_snapshot(bundle, dest):
+    """Clone a snapshot bundle into a new folder, checked out on branch backpaw-restore."""
+    dest = Path(dest)
+    if dest.exists() and any(dest.iterdir()):
+        raise FileExistsError(f"{dest} is not empty")
+    for args, where in ((["clone", "-q", "--no-checkout", str(bundle), str(dest)], Path.cwd()),
+                        (["fetch", "-q", str(bundle), f"{SNAPSHOT_REF}:refs/heads/backpaw-restore"], dest),
+                        (["checkout", "-q", "backpaw-restore"], dest)):
+        r = _git_run(where, *args, timeout=600)
+        if r.returncode:
+            raise OSError(f"git {args[0]} failed: {r.stderr.decode(errors='replace').strip()}")
+    return dest
+
+
+def list_snapshots():
+    d = snapshot_dir()
+    if not d or not d.is_dir():
+        return []
+    return sorted(((slot.name, sorted(slot.glob("*.bundle"))) for slot in d.iterdir() if slot.is_dir()),
+                  key=lambda s: s[0].lower())
 
 
 # ---------- guard ----------
@@ -598,9 +752,17 @@ def _answer(agent, kind, what_or_reason):
     return 2
 
 
+def _snapshot_quietly(cwd):
+    try:
+        maybe_snapshot(cwd)
+    except Exception:  # a snapshot problem must never get in the way of the guard
+        pass
+
+
 def hook(agent="claude"):
     data = json.load(sys.stdin)
     if data.get("hook_event_name") == "SessionStart":
+        _snapshot_quietly(data.get("cwd"))
         w = backup_warnings(data.get("cwd") or os.getcwd())
         if w:
             print(json.dumps({"systemMessage": "Backpaw: " + " ".join(w)}))
@@ -609,6 +771,7 @@ def hook(agent="claude"):
     if tool and destructive_tool(tool) and ask_first_enabled():
         return _answer(agent, "ask", f"run {tool}, which looks like it deletes data")
     command, cwd = _extract(agent, data)
+    _snapshot_quietly(cwd)
     if isinstance(command, list):
         command = " ".join(map(str, command))
     if not command:
@@ -1089,6 +1252,29 @@ def gui():
         ttk.Label(win, text="Claude Code, Cursor and Copilot show you a prompt; other agents are told to ask you.",
                   style="Muted.TLabel").grid(row=7, column=0, columnspan=2, sticky="w", pady=(0, 14))
 
+        ttk.Label(win, text="Code snapshots folder (off when empty):").grid(row=8, column=0, columnspan=2, sticky="w")
+        snap = tk.StringVar(value=str(snapshot_dir() or ""))
+        snap_row = ttk.Frame(win)
+        snap_row.grid(row=9, column=0, columnspan=2, sticky="we", pady=(4, 4))
+        tk.Entry(snap_row, textvariable=snap, bg=C["card"], fg=C["fg"], insertbackground=C["fg"], relief="solid",
+                 bd=1, highlightthickness=0).pack(side="left", fill="x", expand=True, ipady=4)
+
+        def browse():
+            from tkinter import filedialog
+            chosen = filedialog.askdirectory(parent=win, title="Folder for code snapshots")
+            if chosen:
+                snap.set(os.path.normpath(chosen))
+
+        ttk.Button(snap_row, text="Browse…", command=browse).pack(side="left", padx=(6, 0))
+        suggested = suggested_snapshot_dir()
+        if suggested:
+            label = "Use OneDrive" if IS_WIN else "Use iCloud Drive"
+            ttk.Button(snap_row, text=label, command=lambda: snap.set(str(suggested))).pack(side="left", padx=(6, 0))
+        ttk.Label(win, text="Every 30 minutes while an agent works in a git repo, its history, uncommitted edits "
+                  "and new files are saved here.\nPick a folder that syncs to the cloud or lives on another drive. "
+                  "Restore with: backpaw restore-snapshot", style="Muted.TLabel", justify="left").grid(
+            row=10, column=0, columnspan=2, sticky="w", pady=(0, 14))
+
         def save():
             names = [n.strip() for n in dirs.get().split(",") if n.strip()]
             bad = [n for n in names if not valid_dir_name(n)]
@@ -1096,12 +1282,18 @@ def gui():
                 messagebox.showerror("Backpaw", "Use plain folder names (no slashes, drive letters, wildcards "
                                      "or '..'):\n\n" + ", ".join(bad), parent=win)
                 return
-            _save_prefs(stale_days=STALE_CHOICES[days.current()], allowed_dirs=names, ask_api=ask.get())
+            folder = snap.get().strip()
+            if folder and not os.path.isabs(folder):
+                messagebox.showerror("Backpaw", "Choose a full folder path for snapshots, or leave it empty.",
+                                     parent=win)
+                return
+            _save_prefs(stale_days=STALE_CHOICES[days.current()], allowed_dirs=names, ask_api=ask.get(),
+                        snapshot_dir=folder)
             build_banner()
             win.destroy()
 
         btns = ttk.Frame(win)
-        btns.grid(row=8, column=0, columnspan=2, sticky="e")
+        btns.grid(row=11, column=0, columnspan=2, sticky="e")
         ttk.Button(btns, text="Cancel", command=win.destroy).pack(side="right")
         ttk.Button(btns, text="Save", style="Accent.TButton", command=save).pack(side="right", padx=6)
 
@@ -1249,6 +1441,27 @@ def main(argv):
     elif cmd == "check":
         w = backup_warnings(args[0] if args else os.getcwd())
         print("\n".join(w) or "OK: folder is backed up.")
+    elif cmd == "snapshot":
+        try:
+            print("snapshot:", snapshot(args[0] if args else os.getcwd()))
+        except OSError as ex:
+            print("error:", ex, file=sys.stderr)
+            return 1
+    elif cmd == "snapshots":
+        found = list_snapshots()
+        if not found:
+            print("No snapshots yet." if snapshot_dir() else "Snapshots are off: choose a folder in Settings.")
+        for slot, bundles in found:
+            print(f"{slot}: {len(bundles)} kept, newest {bundles[-1] if bundles else '-'}")
+    elif cmd == "restore-snapshot":
+        if len(args) != 2:
+            print("usage: backpaw restore-snapshot BUNDLE DEST", file=sys.stderr)
+            return 1
+        try:
+            print("restored to:", restore_snapshot(*args), "(branch backpaw-restore)")
+        except OSError as ex:
+            print("error:", ex, file=sys.stderr)
+            return 1
     elif cmd in ("install", "uninstall"):
         agents = _agents()
         targets = args or (detected_agents() if cmd == "install" else [k for k in agents if installed(k)])

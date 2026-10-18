@@ -314,6 +314,68 @@ git(repo, "commit", "-qam", "two")  # fresh commit: not stale yet
 assert backpaw.backup_warnings(repo) == [], backpaw.backup_warnings(repo)
 assert backpaw.git_warnings(work) is None  # not a repo: falls back to the OneDrive/Time Machine check
 
+# a repo's own config must never make Backpaw (running outside any sandbox) execute a program
+marker = tmp / "pwned.txt"
+evil = tmp / "evil.sh"
+evil.write_text(f'#!/bin/sh\necho pwned > "{marker.as_posix()}"\n')
+os.chmod(evil, 0o755)
+git(repo, "config", "core.fsmonitor", evil.as_posix())
+(repo / "a.py").write_text("3")  # dirty, so the status check runs
+backpaw.backup_warnings(repo)
+assert not marker.exists(), "core.fsmonitor from repo config was executed"
+
+# code snapshots: full state (history + uncommitted + untracked, minus ignored) to a bundle, restorable elsewhere
+(repo / ".gitignore").write_text("secret.env\n")
+(repo / ".gitattributes").write_text("*.py filter=evil\n")  # a filter git add would run; snapshots must not
+git(repo, "config", "filter.evil.clean", f"sh -c 'echo pwned > \"{marker.as_posix()}\"'")
+(repo / "new_module.py").write_text("brand new, never added")
+(repo / "secret.env").write_text("TOKEN=ignored")
+(repo / "gone.py").write_text("x")
+snaps = tmp / "snaps"
+# the status check itself must not run the filter either (git status runs clean filters on changed files)
+w = backpaw.backup_warnings(repo)
+status_before = backpaw.safe_status(repo)
+assert not marker.exists(), "a repo-defined filter ran during Backpaw's status check"
+assert "new_module.py" in status_before and "a.py" in status_before, status_before
+head_before = backpaw._git(repo, "rev-parse", "HEAD")
+b = backpaw.snapshot(repo, dest=snaps)
+assert b.exists() and b.suffix == ".bundle" and not marker.exists(), (b, marker.exists())
+# the user's repo is untouched: same HEAD, same status (index and working tree unchanged)
+assert backpaw._git(repo, "rev-parse", "HEAD") == head_before and backpaw.safe_status(repo) == status_before
+restored = backpaw.restore_snapshot(b, tmp / "restored")
+assert (restored / "a.py").read_text() == "3"                       # uncommitted edit
+assert (restored / "new_module.py").read_text() == "brand new, never added"  # untracked file
+assert not (restored / "secret.env").exists()                       # ignored stays out
+assert not marker.exists()
+# keeps only the newest few per repo
+for _ in range(backpaw.SNAPSHOT_KEEP + 2):
+    backpaw.snapshot(repo, dest=snaps)
+assert len(list(b.parent.glob("*.bundle"))) == backpaw.SNAPSHOT_KEEP
+assert not list(b.parent.glob("*.partial"))
+# snapshots need a folder; off by default
+try:
+    backpaw.snapshot(repo)
+    raise AssertionError("snapshot without a folder")
+except OSError:
+    pass
+# the hook starts at most one background snapshot per folder per interval, only when a folder is set
+launched = []
+real_popen = subprocess.Popen
+backpaw.subprocess.Popen = lambda *a, **k: launched.append(a[0])
+try:
+    backpaw.maybe_snapshot(str(repo))
+    assert launched == []                            # off: nothing
+    backpaw._save_prefs(snapshot_dir=str(snaps))
+    backpaw.maybe_snapshot(str(repo))
+    backpaw.maybe_snapshot(str(repo))
+    assert len(launched) == 1 and launched[0][-2:] == ["snapshot", os.path.normcase(os.path.abspath(repo))], launched
+    backpaw._save_prefs(snapshot_dir="relative/path")
+    assert backpaw.snapshot_dir() is None             # only absolute folders count
+finally:
+    backpaw.subprocess.Popen = real_popen
+    backpaw._save_prefs(snapshot_dir="")
+git(repo, "config", "--unset", "core.fsmonitor")
+
 import shutil
 shutil.rmtree(work)
 print("all backpaw checks passed")
