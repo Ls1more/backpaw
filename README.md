@@ -10,7 +10,7 @@
 > not a backup and cannot catch every way a program can delete files. Keep real backups (OneDrive, File
 > History, Time Machine). Provided as-is under the [MIT License](LICENSE), with no warranty.
 
-<p align="center"><img src="assets/demo.gif" width="720" alt="Demo: an AI agent's rm -rf src is blocked by Backpaw, the folder goes to the Recycle Bin instead, and one click in the Backpaw window restores it; a terraform destroy makes Backpaw ask first; the Settings dialog turns on code snapshots"></p>
+<p align="center"><img src="assets/demo.gif" width="720" alt="Demo: an AI agent's rm -rf src is blocked by Backpaw, the folder goes to the Recycle Bin instead, and one click in the Backpaw window restores it"></p>
 
 AI agents run shell commands. When one runs `rm -rf`, `Remove-Item` or `mv` on the wrong thing, the agent's
 own undo (like Claude Code's `/rewind`) can't help: shell side effects are outside checkpoint tracking.
@@ -70,6 +70,21 @@ What it does:
   (the number of days is adjustable under **Settings**). Other
   folders are checked for OneDrive (Windows) or iCloud / Time Machine (macOS). OneDrive isn't suggested for
   git repos, since syncing a `.git` folder can corrupt it. Includes a shortcut to Windows System Protection.
+
+## See it in action
+
+**Ask first.** Some deletes can't go to a Recycle Bin: cloud resources, infrastructure, remote git history,
+database rows. When an agent tries one, Backpaw pauses it and explains what it would do. In Claude Code,
+Cursor and Copilot CLI you get a confirmation and the command only runs if you say yes. Agents that can't
+show a confirmation are stopped and told to ask you.
+
+<p align="center"><img src="assets/demo-ask-first.gif" width="720" alt="Demo: an agent runs terraform destroy, Backpaw pauses it with a message saying it will destroy infrastructure and can't be undone; the user says no and the command doesn't run; a list of other commands Backpaw asks about; an agent without a prompt is blocked and told to ask the user"></p>
+
+**Code snapshots.** Turn them on in **Settings** by choosing a folder, for example a share on your local
+backup or NAS. From then on, while an agent works in a git repo, Backpaw saves the repo's unpushed state
+there every 30 minutes, and `backpaw restore-snapshot` brings it back.
+
+<p align="center"><img src="assets/snapshots-settings.png" width="560" alt="Backpaw Settings dialog with the code snapshots folder set to \\local-backup\backups\Backpaw snapshots"></p>
 
 Pure Python standard library, no dependencies. Tested on Windows and macOS with Python 3.11 and 3.13.
 
