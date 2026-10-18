@@ -31,7 +31,7 @@ import time
 import uuid
 from pathlib import Path
 
-__version__ = "0.9.1"
+__version__ = "0.9.2"
 REPO_URL = "https://github.com/Ls1more/backpaw"
 ICON = Path(__file__).resolve().parent / "assets" / "logo.png"
 
@@ -1232,7 +1232,8 @@ def gui():
         win.transient(root)
         brand(win, 1).pack(anchor="w")
         ttk.Label(win, text=f"Version {__version__}", style="Muted.TLabel").pack(anchor="w")
-        ttk.Label(win, text="Get back what AI coding agents deleted or moved.\nRecycle Bin guard, move log, and restore.",
+        ttk.Label(win, text="Get back what AI coding agents deleted or moved.\nRecycle Bin guard, ask-first for "
+                  "cloud and database commands,\nmove log, code snapshots and one-click restore.",
                   justify="left").pack(anchor="w", pady=(12, 12))
         on = [a["name"] for k, a in _agents().items() if installed(k)]
         for label, value in (("Guard", ", ".join(on) or "off"), ("Log", str(LOG)),

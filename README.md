@@ -10,7 +10,7 @@
 > not a backup and cannot catch every way a program can delete files. Keep real backups (OneDrive, File
 > History, Time Machine). Provided as-is under the [MIT License](LICENSE), with no warranty.
 
-<p align="center"><img src="assets/demo.gif" width="720" alt="Demo: an AI agent's rm -rf src is blocked by Backpaw, the folder goes to the Recycle Bin instead, and one click in the Backpaw window restores it"></p>
+<p align="center"><img src="assets/demo.gif" width="720" alt="Demo: an AI agent's rm -rf src is blocked by Backpaw, the folder goes to the Recycle Bin instead, and one click in the Backpaw window restores it; a terraform destroy makes Backpaw ask first; the Settings dialog turns on code snapshots"></p>
 
 AI agents run shell commands. When one runs `rm -rf`, `Remove-Item` or `mv` on the wrong thing, the agent's
 own undo (like Claude Code's `/rewind`) can't help: shell side effects are outside checkpoint tracking.
@@ -37,9 +37,12 @@ What it does:
 - **Guard**: blocks shell deletes and tells the agent to use `backpaw trash` instead, which sends files to
   the real **Recycle Bin** (Windows) or **Trash** (macOS). Also blocks other ways to lose work: emptying the
   Recycle Bin, `git clean`, `git reset --hard`, `git checkout --` / `git restore` / `git stash drop`,
-  `rsync --delete`, `robocopy /MIR`, and moves or copies that would overwrite an existing file.
+  `rsync --delete`, `robocopy /MIR`, and moves or copies that would overwrite an existing file. It sees
+  through wrappers and launchers (`bash -c`, `powershell -Command`, `sudo`, `xargs`, `timeout`,
+  `find -exec rm`, `python -c` / `node -e` one-liners) and expands `~` the way the shell does.
   Deletes inside the system temp folder (agent scratch space), build-output folders (`node_modules`, `dist`,
-  `build`, `.venv`, `__pycache__`, ... editable under **Settings**) and commands run over `ssh` are allowed.
+  `build`, `.venv`, `__pycache__`, ... editable under **Settings**) and the remote part of `ssh` commands are
+  allowed.
 - **Ask first for things a Recycle Bin can't catch**: destructive cloud, API and database commands
   (`aws s3 rm`, `terraform destroy`, `kubectl delete`, `gh repo delete`, `git push --force`,
   `curl -X DELETE`, `DROP TABLE`, `DELETE FROM` without `WHERE`, `FLUSHALL`, ...) and MCP tools whose names
@@ -47,8 +50,10 @@ What it does:
   confirmation prompt; agents without one are blocked and told to ask you. Can be turned off in **Settings**.
 - **Move log**: every `mv` / `Move-Item` is recorded so it can be undone. A move that would overwrite an
   existing file is blocked until that file is trashed.
-- **Restore window**: select rows, click **Restore**. Turn the guard on or off per agent. Follows the
-  system light/dark theme.
+- **Restore window**: select rows, click **Restore**, confirm. It refreshes itself while open, warns twice
+  before restoring into sensitive places (Startup, shell profiles, `.ssh`, agent configs), and refuses log
+  entries that don't match a real Backpaw action (shown as `suspicious`). Turn the guard on or off per agent.
+  Follows the system light/dark theme.
 - **Code snapshots** (opt-in): unpushed commits, uncommitted edits and new files exist only on your machine
   until you push, so anything that wipes the disk (an antivirus false positive, a bad script) takes them
   with it. While an agent works in a git repo, Backpaw saves the repo's full state every 30 minutes as one

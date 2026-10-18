@@ -2,6 +2,15 @@
 
 All notable changes to Backpaw. Versions follow `MAJOR.MINOR.PATCH`.
 
+## 0.9.2 — docs and demo refresh
+- Demo GIF rebuilt from the current version, with two new scenes: "ask first" for a `terraform destroy`,
+  and the Settings dialog turning on code snapshots.
+- README: guard section covers wrappers, launchers, one-liners, `~` expansion and the ssh change; restore
+  section covers auto-refresh, the confirmation, sensitive-destination warnings and `suspicious` entries;
+  privacy section covers code snapshots, synced folders and every file Backpaw writes.
+- About box mentions ask-first and code snapshots.
+- SECURITY.md: git calls, snapshots and ask-first are listed as in scope.
+
 ## 0.9.1 — security review fixes
 
 A full review of everything Backpaw runs outside agent sandboxes. All fixes have regression tests.
@@ -53,7 +62,6 @@ A full review of everything Backpaw runs outside agent sandboxes. All fixes have
 - README: antivirus/EDR quarantine is outside Backpaw's reach, and shadow copies aren't a backup.
 - README: fix for "Python was not found" right after installing Python.
 - README: security model and limits updated for everything above. This changelog added.
-- README: privacy section covers code snapshots, synced folders, and every file Backpaw writes.
 
 ## 0.9.0 — code snapshots
 - **Code snapshots (opt-in).** While an agent works in a git repo, Backpaw saves the repo's full state every

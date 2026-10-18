@@ -15,6 +15,9 @@ Include what you ran, what happened, and what you expected. You'll get a reply w
   makes **Restore** put a file somewhere new, or code execution through the hook).
 - A delete or overwrite command that slips past the guard and isn't listed under "Known gaps" in the README.
 - Anything that corrupts an agent's config file during install/uninstall.
+- A way to make Backpaw's git calls (backup check, code snapshots) run a program, or to make a snapshot copy
+  files from outside the repo.
+- A destructive cloud, API or database command that should trigger "ask first" but doesn't.
 
 ## Out of scope
 
